@@ -27,6 +27,31 @@ from .proto.support.message import ProtoMessage
 _LOGGER = logging.getLogger(__name__)
 
 
+def _decode_varint(data: bytes, start_idx: int) -> tuple[int, int]:
+    """Decode a protobuf varint from bytes.
+    
+    Args:
+        data: The bytes to decode from
+        start_idx: Starting index in the data
+        
+    Returns:
+        Tuple of (decoded_value, next_index)
+    """
+    result = 0
+    shift = 0
+    idx = start_idx
+    
+    while idx < len(data):
+        byte = data[idx]
+        result |= (byte & 0x7F) << shift
+        idx += 1
+        if (byte & 0x80) == 0:
+            break
+        shift += 7
+    
+    return result, idx
+
+
 class River3ChargingStateSensorEntity(BaseSensorEntity):
     """ChargingStateSensorEntity for River3 with inverted values.
     
@@ -58,14 +83,14 @@ def _create_river3_proto_command(field_name: str, value: int, device_sn: str, da
     """Create a River3 protobuf command for set_dp3 message structure.
     
     River3 commands must be sent as protobuf (SendHeaderMsg), not JSON.
-    Based on the JavaScript implementation at lines 3245-3360 and protobuf at 3864-3892.
+    Based on the JavaScript implementation at lines 3245-3360 and protobuf at 3807-3892.
     
     The structure is:
     - SendHeaderMsg with header fields (src, dest, cmd_func=254, cmd_id=17, etc.)
-    - pdata contains the set_dp3 message with the specific field set
+    - pdata contains the set_dp3 protobuf message with the specific field set
     
     Args:
-        field_name: The protobuf field name (e.g., 'cfgDc12vOutOpen', 'xboostEn')
+        field_name: The protobuf field name in snake_case (e.g., 'cfg_dc12v_out_open', 'xboost_en')
         value: The integer value (0 or 1 for switches)
         device_sn: The device serial number
         data_len: The data length for the command
@@ -73,6 +98,7 @@ def _create_river3_proto_command(field_name: str, value: int, device_sn: str, da
     from .proto.ecopacket_pb2 import SendHeaderMsg
     from .proto.support.message import ProtoMessage
     import time
+    import struct
     
     # Create SendHeaderMsg packet matching JS structure (lines 3245-3263)
     packet = SendHeaderMsg()
@@ -95,13 +121,66 @@ def _create_river3_proto_command(field_name: str, value: int, device_sn: str, da
     message.device_sn = device_sn
     message.data_len = data_len
     
-    # For pdata, we need to encode the field=value as a simple structure
-    # The JS encodes this as protobuf using the set_dp3 message type
-    # Since we don't have the full set_dp3 protobuf in Python, we'll encode as JSON
-    # which the device might be able to parse
-    import json
-    pdata_dict = {field_name: value}
-    message.pdata = json.dumps(pdata_dict).encode('utf-8')
+    # Encode the pdata as protobuf set_dp3 message
+    # Field mapping (from river3.js protoSource lines 3807-3833):
+    # - cfg_dc12v_out_open = field 18
+    # - cfg_ac_out_open = field 76
+    # - xboost_en = field 25
+    # - en_beep = field 9
+    # - output_power_off_memory = field 141
+    # All are int32/uint32 types
+    
+    field_numbers = {
+        'en_beep': 9,
+        'cfg_dc12v_out_open': 18,
+        'xboost_en': 25,
+        'cms_max_chg_soc': 33,
+        'cms_min_dsg_soc': 34,
+        'plug_in_info_ac_in_chg_pow_max': 54,
+        'cfg_ac_out_open': 76,
+        'plug_in_info_pv_dc_amp_max': 87,
+        'pv_chg_type': 90,
+        'output_power_off_memory': 141,
+        # Note: cfg_energy_backup is field 43 but is a nested message, handled separately
+    }
+    
+    if field_name not in field_numbers:
+        _LOGGER.error(f"Unknown set_dp3 field: {field_name}")
+        # Try to continue anyway in case there are other valid fields
+    
+    # Manually encode the protobuf message for set_dp3
+    # Protobuf encoding: field_number << 3 | wire_type
+    # wire_type 0 = varint (for int32/uint32)
+    pdata = bytearray()
+    
+    if field_name in field_numbers:
+        field_num = field_numbers[field_name]
+        # Encode field key: (field_number << 3) | wire_type
+        # wire_type = 0 for varint
+        field_key = (field_num << 3) | 0
+        
+        # Encode the field key as varint
+        while field_key > 0x7F:
+            pdata.append((field_key & 0x7F) | 0x80)
+            field_key >>= 7
+        pdata.append(field_key & 0x7F)
+        
+        # Encode the value as varint
+        val = int(value)
+        if val < 0:
+            # Negative int32 uses 10 bytes in protobuf
+            val = val & 0xFFFFFFFF  # Convert to unsigned representation
+        while val > 0x7F:
+            pdata.append((val & 0x7F) | 0x80)
+            val >>= 7
+        pdata.append(val & 0x7F)
+    
+    message.pdata = bytes(pdata)
+    
+    _LOGGER.info(
+        f"River3 command: {field_name}={value}, field_num={field_numbers.get(field_name, '?')}, "
+        f"pdata_hex={pdata.hex()}, data_len={data_len}"
+    )
     
     # Return the packet serialized as bytes via ProtoMessage wrapper
     class River3CommandMessage(ProtoMessage):
@@ -202,6 +281,80 @@ class River3(BaseDevice):
                         )
                     except Exception as e:
                         _LOGGER.error(f"Error parsing protobuf payload for {command.name}: {e}", exc_info=True)
+                
+                # Handle set_dp3 (cmd_func=254, cmd_id=17) and setReply_dp3 (cmd_func=254, cmd_id=18)
+                # These contain switch states for AC/DC outputs that aren't in DisplayPropertyUpload
+                elif command_desc.func == 254 and command_desc.id in (17, 18):
+                    _LOGGER.info(
+                        f"River3 received set_dp3 message: cmd_id={command_desc.id}, "
+                        f"pdata_len={len(message.pdata)}, pdata_hex={message.pdata.hex()}"
+                    )
+                    try:
+                        if message.enc_type == 1:
+                            message.pdata = bytes([byte ^ (message.seq % 256) for byte in message.pdata])
+                            _LOGGER.debug(f"River3 decrypted pdata: {message.pdata.hex()}")
+                        
+                        # Parse the pdata as a generic protobuf message to extract fields
+                        # We'll manually decode the protobuf varint fields
+                        pdata = message.pdata
+                        idx = 0
+                        parsed_fields = {}
+                        
+                        while idx < len(pdata):
+                            # Read field key (field_number << 3 | wire_type)
+                            field_key, idx = _decode_varint(pdata, idx)
+                            field_num = field_key >> 3
+                            wire_type = field_key & 0x7
+                            
+                            if wire_type == 0:  # varint
+                                value, idx = _decode_varint(pdata, idx)
+                                parsed_fields[field_num] = value
+                            elif wire_type == 2:  # length-delimited (nested message or string)
+                                length, idx = _decode_varint(pdata, idx)
+                                # For now, just skip these bytes (could be cfg_energy_backup)
+                                idx += length
+                            else:
+                                _LOGGER.warning(f"Unknown wire_type {wire_type} for field {field_num}")
+                                break
+                        
+                        # Map field numbers to state names (reverse of the field_numbers dict)
+                        # Note: These are set_dp3 field numbers, not DisplayPropertyUpload
+                        field_name_map = {
+                            9: 'enBeep',
+                            18: 'cfgDc12vOutOpen',  # set_dp3 DC output command (not the same as dcOutOpen in DisplayPropertyUpload)
+                            25: 'xboostEn',
+                            33: 'cmsMaxChgSoc',
+                            34: 'cmsMinDsgSoc',
+                            54: 'plugInInfoAcInChgPowMax',
+                            74: 'dcOutOpen',  # DisplayPropertyUpload also has this field (DC output status)
+                            76: 'cfgAcOutOpen',  # set_dp3 AC output command (only in set_dp3, not DisplayPropertyUpload)
+                            87: 'plugInInfoPvDcAmpMax',
+                            90: 'pvChgType',
+                            141: 'outputPowerOffMemory',
+                        }
+                        
+                        # For cmd_id=18 (setReply_dp3), check if configOk field (field 2) is true
+                        if command_desc.id == 18:
+                            config_ok = parsed_fields.get(2, 0)
+                            if not config_ok:
+                                _LOGGER.warning(f"River3 set_dp3 command failed (configOk=false)")
+                                continue
+                        
+                        # Store parsed fields in params under the "254_21" prefix (to match DisplayPropertyUpload)
+                        # This allows switches to read their state from set_dp3 responses
+                        for field_num, value in parsed_fields.items():
+                            if field_num in field_name_map:
+                                state_name = field_name_map[field_num]
+                                params[f"254_21.{state_name}"] = value
+                                _LOGGER.info(
+                                    f"River3 set_dp3 (cmd_id {command_desc.id}): field_{field_num} ({state_name}) = {value}"
+                                )
+                            else:
+                                _LOGGER.debug(
+                                    f"River3 set_dp3 (cmd_id {command_desc.id}): unknown field_{field_num} = {value}"
+                                )
+                    except Exception as e:
+                        _LOGGER.error(f"Error parsing set_dp3 payload: {e}", exc_info=True)
                         
                 res["timestamp"] = dt.utcnow()
         except Exception as error:
@@ -296,36 +449,40 @@ class River3(BaseDevice):
         device = self
         # River3 commands MUST be sent as protobuf, not JSON
         # Using _create_river3_proto_command to generate proper SendHeaderMsg packets
+        # Note: Field names must be in snake_case as per protobuf definition
         return [
             # Beeper - data_len=2 per JS
             BeeperEntity(client, self, "254_21.enBeep", const.BEEPER,
                          lambda value: _create_river3_proto_command(
-                             "enBeep", 1 if value else 0, device.device_data.sn, data_len=2)),
+                             "en_beep", 1 if value else 0, device.device_data.sn, data_len=2)),
 
-            # AC Output switch
+            # AC Output switch - NOTE: Uses flowInfoDc2ac as status proxy (DC->AC converter on/off)
+            # Command uses cfg_ac_out_open (field 76 in set_dp3), but status comes from flowInfoDc2ac (field 46)
+            # flowInfoDc2ac values: 0=off, 2=on, so we need a custom entity that maps 2->1
             EnabledEntity(client, self, "254_21.cfgAcOutOpen", const.AC_ENABLED,
                           lambda value: _create_river3_proto_command(
-                              "cfgAcOutOpen", 1 if value else 0, device.device_data.sn)),
+                              "cfg_ac_out_open", 1 if value else 0, device.device_data.sn)),
 
             # X-Boost switch
             EnabledEntity(client, self, "254_21.xboostEn", const.XBOOST_ENABLED,
                           lambda value: _create_river3_proto_command(
-                              "xboostEn", 1 if value else 0, device.device_data.sn)),
+                              "xboost_en", 1 if value else 0, device.device_data.sn)),
 
-            # DC 12V Output switch
-            EnabledEntity(client, self, "254_21.cfgDc12vOutOpen", const.DC_ENABLED,
+            # DC 12V Output switch - NOTE: Status comes from dc_out_open (field 74 in DisplayPropertyUpload)
+            # but command uses cfg_dc12v_out_open (field 18 in set_dp3)
+            EnabledEntity(client, self, "254_21.dcOutOpen", const.DC_ENABLED,
                           lambda value: _create_river3_proto_command(
-                              "cfgDc12vOutOpen", 1 if value else 0, device.device_data.sn)),
+                              "cfg_dc12v_out_open", 1 if value else 0, device.device_data.sn)),
 
             # AC Always On (output power off memory)
             EnabledEntity(client, self, "254_21.outputPowerOffMemory", const.AC_ALWAYS_ENABLED,
                           lambda value: _create_river3_proto_command(
-                              "outputPowerOffMemory", 1 if value else 0, device.device_data.sn)),
+                              "output_power_off_memory", 1 if value else 0, device.device_data.sn)),
 
             # Backup Reserve
             EnabledEntity(client, self, "254_21.energyBackupEn", const.BP_ENABLED,
                           lambda value: _create_river3_proto_command(
-                              "energyBackupEn", 1 if value else 0, device.device_data.sn, data_len=7)),
+                              "energy_backup_en", 1 if value else 0, device.device_data.sn, data_len=7)),
         ]
 
     def selects(self, client: EcoflowApiClient) -> list[BaseSelectEntity]:
