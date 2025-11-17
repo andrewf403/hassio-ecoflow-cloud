@@ -310,7 +310,7 @@ class River3(BaseDevice):
                                                "params": {"chgWatts": int(value), "chgPauseFlag": 255}}),
 
             BatteryBackupLevel(client, self, "254_21.energyBackupStartSoc", const.BACKUP_RESERVE_LEVEL, 5, 100,
-                               "254_21.cmsMinDsgSoc", "254_21.cmsMaxChgSoc",
+                               "254_21.cmsMinDsgSoc", "254_21.cmsMaxChgSoc", 5,
                                lambda value: {"moduleType": 1, "operateType": "watthConfig",
                                               "params": {"isConfig": 1,
                                                          "energyBackupStartSoc": int(value),
