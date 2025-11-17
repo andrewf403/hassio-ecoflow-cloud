@@ -456,9 +456,9 @@ class River3(BaseDevice):
                          lambda value: _create_river3_proto_command(
                              "en_beep", 1 if value else 0, device.device_data.sn, data_len=2)),
 
-            # AC Output switch - NOTE: Uses flowInfoDc2ac as status proxy (DC->AC converter on/off)
-            # Command uses cfg_ac_out_open (field 76 in set_dp3), but status comes from flowInfoDc2ac (field 46)
-            # flowInfoDc2ac values: 0=off, 2=on, so we need a custom entity that maps 2->1
+            # AC Output switch - NOTE: Status comes from cfgAcOutOpen in set_dp3/setReply_dp3 messages
+            # Unlike DC (which has dcOutOpen in DisplayPropertyUpload), AC status only comes from set_dp3
+            # This means status updates only when commands are sent/acknowledged, not in regular status messages
             EnabledEntity(client, self, "254_21.cfgAcOutOpen", const.AC_ENABLED,
                           lambda value: _create_river3_proto_command(
                               "cfg_ac_out_open", 1 if value else 0, device.device_data.sn)),
@@ -468,7 +468,7 @@ class River3(BaseDevice):
                           lambda value: _create_river3_proto_command(
                               "xboost_en", 1 if value else 0, device.device_data.sn)),
 
-            # DC 12V Output switch - NOTE: Status comes from dc_out_open (field 74 in DisplayPropertyUpload)
+            # DC 12V Output switch - NOTE: Status comes from dcOutOpen (field in DisplayPropertyUpload)
             # but command uses cfg_dc12v_out_open (field 18 in set_dp3)
             EnabledEntity(client, self, "254_21.dcOutOpen", const.DC_ENABLED,
                           lambda value: _create_river3_proto_command(
