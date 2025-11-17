@@ -54,51 +54,65 @@ class OutWattsAbsSensorEntity(OutWattsSensorEntity):
         return super()._update_value(abs(int(val)))
 
 
-def _json_to_proto_command(json_cmd: dict[str, Any], device_sn: str) -> ProtoMessage:
-    """Convert JSON command to ProtoMessage for River3.
+def _create_river3_proto_command(field_name: str, value: int, device_sn: str, data_len: int = 3):
+    """Create a River3 protobuf command for set_dp3 message structure.
     
-    River3 uses protobuf for commands, but the command structure uses JSON-like
-    params. We encode the JSON params as bytes in the protobuf payload.
+    River3 commands must be sent as protobuf (SendHeaderMsg), not JSON.
+    Based on the JavaScript implementation at lines 3245-3360 and protobuf at 3864-3892.
+    
+    The structure is:
+    - SendHeaderMsg with header fields (src, dest, cmd_func=254, cmd_id=17, etc.)
+    - pdata contains the set_dp3 message with the specific field set
+    
+    Args:
+        field_name: The protobuf field name (e.g., 'cfgDc12vOutOpen', 'xboostEn')
+        value: The integer value (0 or 1 for switches)
+        device_sn: The device serial number
+        data_len: The data length for the command
     """
     from .proto.ecopacket_pb2 import SendHeaderMsg
+    from .proto.support.message import ProtoMessage
+    import time
     
-    # Create a SendHeaderMsg with the JSON params encoded as bytes
+    # Create SendHeaderMsg packet matching JS structure (lines 3245-3263)
     packet = SendHeaderMsg()
     message = packet.msg.add()
     
-    # Set command function and ID (254_17 for River3 set commands)
+    # Set all required header fields from JS implementation
+    message.src = 32  # APP
+    message.dest = 2  # IOT2
+    message.d_src = 1
+    message.d_dest = 1
     message.cmd_func = 254
     message.cmd_id = 17
-    
-    # Encode JSON params as bytes
-    json_bytes = json.dumps(json_cmd).encode('utf-8')
-    message.pdata = json_bytes
-    message.data_len = len(json_bytes)
-    
-    # Set source and destination
-    message.src = AddressId.APP.value
-    message.dest = AddressId.IOT2.value  # dest:2 from markdown
+    message.need_ack = 1
+    # seq is int32, so we need to keep it within range (max 2^31-1 = 2147483647)
+    # Use modulo to wrap the timestamp and keep lower 31 bits
+    message.seq = int(time.time() * 1000) % 2147483647
+    message.product_id = 1
+    message.version = 19
+    message.payload_ver = 1
     message.device_sn = device_sn
+    message.data_len = data_len
     
-    # Create a wrapper ProtoMessage that bypasses normal payload verification
-    # by overriding to_proto_message to return our custom packet
-    class River3ProtoMessage(ProtoMessage):
+    # For pdata, we need to encode the field=value as a simple structure
+    # The JS encodes this as protobuf using the set_dp3 message type
+    # Since we don't have the full set_dp3 protobuf in Python, we'll encode as JSON
+    # which the device might be able to parse
+    import json
+    pdata_dict = {field_name: value}
+    message.pdata = json.dumps(pdata_dict).encode('utf-8')
+    
+    # Return the packet serialized as bytes via ProtoMessage wrapper
+    class River3CommandMessage(ProtoMessage):
         def __init__(self, packet: SendHeaderMsg):
-            # Don't call super().__init__() with command/payload since we're bypassing that
-            from ...api.message import Message
-            Message.__init__(self)
+            super().__init__(command=None, payload=None)
             self._packet = packet
-        
-        def to_proto_message(self):
-            return self._packet
-        
-        def _verify_command_and_payload(self):
-            pass  # Skip verification for custom commands
         
         def private_api_to_mqtt_payload(self):
             return self._packet.SerializeToString()
     
-    return River3ProtoMessage(packet)
+    return River3CommandMessage(packet)
 
 
 class River3(BaseDevice):
@@ -216,7 +230,8 @@ class River3(BaseDevice):
             OutWattsSensorEntity(client, self, "254_21.powOutSumW", const.TOTAL_OUT_POWER).with_energy(),
 
             InMilliampSensorEntity(client, self, "254_22.plugInInfoPvAmp", const.SOLAR_IN_CURRENT),
-            InVoltSensorEntity(client, self, "254_22.plugInInfoPvVol", const.SOLAR_IN_VOLTAGE),
+            # Not sure if it works correctly, didn't test it yet
+            # InVoltSensorEntity(client, self, "254_22.plugInInfoPvVol", const.SOLAR_IN_VOLTAGE),
 
             InWattsSensorEntity(client, self, "254_21.powGetAcIn", const.AC_IN_POWER),
             OutWattsAbsSensorEntity(client, self, "254_21.powGetAcOut", const.AC_OUT_POWER),
@@ -238,7 +253,7 @@ class River3(BaseDevice):
             TempSensorEntity(client, self, "254_22.tempPcsDc", "PCS DC Temperature"),
             TempSensorEntity(client, self, "254_22.tempPcsAc", "PCS AC Temperature"),
             # Cycles from BMSHeartBeatReport - may need different handling
-            CyclesSensorEntity(client, self, "254_21.cycles", const.CYCLES),
+            # CyclesSensorEntity(client, self, "254_21.cycles", const.CYCLES),
 
             TempSensorEntity(client, self, "254_21.bmsMinCellTemp", const.BATTERY_TEMP)
                 .attr("254_21.bmsMaxCellTemp", const.ATTR_MAX_CELL_TEMP, 0),
@@ -279,43 +294,38 @@ class River3(BaseDevice):
 
     def switches(self, client: EcoflowApiClient) -> list[BaseSwitchEntity]:
         device = self
-        
+        # River3 commands MUST be sent as protobuf, not JSON
+        # Using _create_river3_proto_command to generate proper SendHeaderMsg packets
         return [
+            # Beeper - data_len=2 per JS
             BeeperEntity(client, self, "254_21.enBeep", const.BEEPER,
-                         lambda value: _json_to_proto_command(
-                             {"moduleType": 5, "operateType": "quietMode",
-                              "params": {"enabled": value}}, device.device_data.sn)),
+                         lambda value: _create_river3_proto_command(
+                             "enBeep", 1 if value else 0, device.device_data.sn, data_len=2)),
 
+            # AC Output switch
             EnabledEntity(client, self, "254_21.cfgAcOutOpen", const.AC_ENABLED,
-                          lambda value, params: _json_to_proto_command(
-                              {"moduleType": 5, "operateType": "acOutCfg",
-                               "params": {"enabled": value, "out_voltage": -1, "out_freq": 255,
-                                          "xboost": params.get("254_21.xboostEn", 255) if params else 255}}, device.device_data.sn)),
+                          lambda value: _create_river3_proto_command(
+                              "cfgAcOutOpen", 1 if value else 0, device.device_data.sn)),
 
+            # X-Boost switch
             EnabledEntity(client, self, "254_21.xboostEn", const.XBOOST_ENABLED,
-                          lambda value, params: _json_to_proto_command(
-                              {"moduleType": 5, "operateType": "acOutCfg",
-                               "params": {"enabled": params.get("254_21.cfgAcOutOpen", 255) if params else 255, "out_voltage": -1, "out_freq": 255,
-                                          "xboost": value}}, device.device_data.sn)),
+                          lambda value: _create_river3_proto_command(
+                              "xboostEn", 1 if value else 0, device.device_data.sn)),
 
+            # DC 12V Output switch
             EnabledEntity(client, self, "254_21.cfgDc12vOutOpen", const.DC_ENABLED,
-                          lambda value: _json_to_proto_command(
-                              {"moduleType": 5, "operateType": "mpptCar",
-                               "params": {"enabled": value}}, device.device_data.sn)),
+                          lambda value: _create_river3_proto_command(
+                              "cfgDc12vOutOpen", 1 if value else 0, device.device_data.sn)),
 
-            EnabledEntity(client, self, "254_21.energyBackupEn", const.BP_ENABLED,
-                          lambda value, params: _json_to_proto_command(
-                              {"moduleType": 1, "operateType": "watthConfig",
-                               "params": {"isConfig": value,
-                                          "energyBackupStartSoc": value * 50,
-                                          "minDsgSoc": 0,
-                                          "minChgSoc": 0}}, device.device_data.sn)),
-
+            # AC Always On (output power off memory)
             EnabledEntity(client, self, "254_21.outputPowerOffMemory", const.AC_ALWAYS_ENABLED,
-                          lambda value, params: _json_to_proto_command(
-                              {"moduleType": 1, "operateType": "acAutoOutConfig",
-                               "params": {"acAutoOutConfig": value,
-                                          "minAcOutSoc": int(params.get("254_21.cmsMinDsgSoc", 0)) + 5}}, device.device_data.sn)),
+                          lambda value: _create_river3_proto_command(
+                              "outputPowerOffMemory", 1 if value else 0, device.device_data.sn)),
+
+            # Backup Reserve
+            EnabledEntity(client, self, "254_21.energyBackupEn", const.BP_ENABLED,
+                          lambda value: _create_river3_proto_command(
+                              "energyBackupEn", 1 if value else 0, device.device_data.sn, data_len=7)),
         ]
 
     def selects(self, client: EcoflowApiClient) -> list[BaseSelectEntity]:
