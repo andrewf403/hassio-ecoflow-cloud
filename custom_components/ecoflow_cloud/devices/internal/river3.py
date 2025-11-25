@@ -165,9 +165,9 @@ class River3(BaseDevice):
                 50,
                 100,
                 lambda value: {
-                    "moduleType": 2,
-                    "operateType": "upsConfig",
-                    "params": {"maxChgSoc": int(value)},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 33, "cmsMaxChgSoc": int(value)},
                 },
             ),
             MinBatteryLevelEntity(
@@ -178,9 +178,9 @@ class River3(BaseDevice):
                 0,
                 30,
                 lambda value: {
-                    "moduleType": 2,
-                    "operateType": "dsgCfg",
-                    "params": {"minDsgSoc": int(value)},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 34, "cmsMinDsgSoc": int(value)},
                 },
             ),
             ChargingPowerEntity(
@@ -191,9 +191,9 @@ class River3(BaseDevice):
                 50,
                 305,
                 lambda value: {
-                    "moduleType": 5,
-                    "operateType": "acChgCfg",
-                    "params": {"chgWatts": int(value), "chgPauseFlag": 255},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 54, "plugInInfoAcInChgPowMax": int(value)},
                 },
             ),
             BatteryBackupLevel(
@@ -207,13 +207,14 @@ class River3(BaseDevice):
                 "cms_max_chg_soc",
                 5,
                 lambda value: {
-                    "moduleType": 1,
-                    "operateType": "watthConfig",
+                    "moduleType": 0,
+                    "operateType": "TCP",
                     "params": {
-                        "isConfig": 1,
-                        "energyBackupStartSoc": int(value),
-                        "minDsgSoc": 0,
-                        "minChgSoc": 0,
+                        "id": 43,
+                        "cfgEnergyBackup": {
+                            "energyBackupEn": 1,
+                            "energyBackupStartSoc": int(value),
+                        },
                     },
                 },
             ),
@@ -222,77 +223,76 @@ class River3(BaseDevice):
     @override
     def switches(self, client: EcoflowApiClient) -> list[BaseSwitchEntity]:
         return [
-            # Beeper control - en_beep is in DisplayPropertyUpload (field 195)
+            # Beeper control - en_beep field 9 in SetCommand, field 195 in Display
             BeeperEntity(
                 client,
                 self,
                 "en_beep",
                 const.BEEPER,
                 lambda value: {
-                    "moduleType": 5,
-                    "operateType": "beepSwitch",
-                    "params": {"enabled": 1 if value else 0},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 9, "enBeep": value},
                 },
             ),
-            # AC Output - flow_info_ac_out indicates AC output flow direction
-            # cfg_ac_out_open is for set commands, but may not be in DisplayPropertyUpload
+            # AC Output - cfg_ac_out_open field 76 in SetCommand
             EnabledEntity(
                 client,
                 self,
-                "flow_info_dc2ac",  # Flow direction for DC to AC (output)
+                "cfg_ac_out_open",
                 const.AC_ENABLED,
                 lambda value, params=None: {
-                    "moduleType": 5,
-                    "operateType": "acOutCfg",
-                    "params": {"enabled": 1 if value else 0},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 76, "cfgAcOutOpen": value},
                 },
             ),
-            # X-Boost - xboost_en is in DisplayPropertyUpload (field 25)
+            # X-Boost - xboost_en field 25 in SetCommand
             EnabledEntity(
                 client,
                 self,
                 "xboost_en",
                 const.XBOOST_ENABLED,
                 lambda value, params=None: {
-                    "moduleType": 5,
-                    "operateType": "xboost",
-                    "params": {"xboost": 1 if value else 0},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 25, "xboostEn": value},
                 },
             ),
-            # DC Output - flow_info_12v indicates 12V DC flow (field 33)
+            # DC 12V Output - cfg_dc12v_out_open field 18 in SetCommand
             EnabledEntity(
                 client,
                 self,
-                "flow_info_12v",
+                "dc_out_open",
                 const.DC_ENABLED,
                 lambda value, params=None: {
-                    "moduleType": 5,
-                    "operateType": "dcOutCfg",
-                    "params": {"enabled": 1 if value else 0},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 18, "cfgDc12vOutOpen": value},
                 },
             ),
-            # AC Always On - output_power_off_memory in DisplayPropertyUpload (field 147)
+            # AC Always On - output_power_off_memory field 147 in SetCommand
             EnabledEntity(
                 client,
                 self,
                 "output_power_off_memory",
                 const.AC_ALWAYS_ENABLED,
                 lambda value, params=None: {
-                    "moduleType": 5,
-                    "operateType": "acAlwaysOn",
-                    "params": {"enabled": 1 if value else 0},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 147, "outputPowerOffMemory": value},
                 },
             ),
-            # Backup Reserve - energy_backup_en in DisplayPropertyUpload (field 7)
+            # Backup Reserve - cfg_energy_backup field 43 in SetCommand
             EnabledEntity(
                 client,
                 self,
                 "energy_backup_en",
                 const.BP_ENABLED,
                 lambda value, params=None: {
-                    "moduleType": 1,
-                    "operateType": "watthConfig",
-                    "params": {"isConfig": 1 if value else 0},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 43, "cfgEnergyBackup": {"energyBackupEn": 1 if value else 0}},
                 },
             ),
         ]
@@ -309,9 +309,9 @@ class River3(BaseDevice):
                 const.DC_CHARGE_CURRENT,
                 dc_charge_current_options,
                 lambda value: {
-                    "moduleType": 5,
-                    "operateType": "dcChgCfg",
-                    "params": {"dcChgCfg": value},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 87, "plugInInfoPvDcAmpMax": value},
                 },
             ),
             DictSelectEntity(
@@ -321,9 +321,9 @@ class River3(BaseDevice):
                 const.DC_MODE,
                 const.DC_MODE_OPTIONS,
                 lambda value: {
-                    "moduleType": 5,
-                    "operateType": "chaType",
-                    "params": {"chaType": value},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 90, "pvChgType": value},
                 },
             ),
             TimeoutDictSelectEntity(
@@ -333,9 +333,9 @@ class River3(BaseDevice):
                 const.SCREEN_TIMEOUT,
                 const.SCREEN_TIMEOUT_OPTIONS,
                 lambda value: {
-                    "moduleType": 5,
-                    "operateType": "lcdCfg",
-                    "params": {"brighLevel": 255, "delayOff": value},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 12, "screenOffTime": value},
                 },
             ),
             TimeoutDictSelectEntity(
@@ -345,9 +345,9 @@ class River3(BaseDevice):
                 const.UNIT_TIMEOUT,
                 const.UNIT_TIMEOUT_OPTIONS,
                 lambda value: {
-                    "moduleType": 5,
-                    "operateType": "standby",
-                    "params": {"standbyMins": value},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 13, "devStandbyTime": value},
                 },
             ),
             TimeoutDictSelectEntity(
@@ -357,9 +357,9 @@ class River3(BaseDevice):
                 const.AC_TIMEOUT,
                 const.AC_TIMEOUT_OPTIONS,
                 lambda value: {
-                    "moduleType": 5,
-                    "operateType": "acStandby",
-                    "params": {"standbyMins": value},
+                    "moduleType": 0,
+                    "operateType": "TCP",
+                    "params": {"id": 10, "acStandbyTime": value},
                 },
             ),
         ]
@@ -659,21 +659,25 @@ class River3(BaseDevice):
 
     @override
     def update_data(self, raw_data, data_type: str) -> bool:
-        """Decode protobuf only for data_topic; otherwise use BaseDevice JSON path."""
+        """Decode protobuf for all topics since River 3 uses protobuf throughout."""
         if data_type == self.device_info.data_topic:
             raw = self._prepare_data(raw_data)
             self.data.update_data(raw)
         elif data_type == self.device_info.set_topic:
-            raw = BaseDevice._prepare_data(self, raw_data)
+            # Set commands we send - use protobuf parsing
+            raw = self._prepare_data(raw_data)
             self.data.add_set_message(raw)
         elif data_type == self.device_info.set_reply_topic:
-            raw = BaseDevice._prepare_data(self, raw_data)
+            # Device replies with protobuf
+            raw = self._prepare_data(raw_data)
             self.data.add_set_reply_message(raw)
         elif data_type == self.device_info.get_topic:
-            raw = BaseDevice._prepare_data(self, raw_data)
+            # Get commands we send - use protobuf parsing
+            raw = self._prepare_data(raw_data)
             self.data.add_get_message(raw)
         elif data_type == self.device_info.get_reply_topic:
-            raw = BaseDevice._prepare_data(self, raw_data)
+            # Device replies with protobuf
+            raw = self._prepare_data(raw_data)
             self.data.add_get_reply_message(raw)
         else:
             return False
