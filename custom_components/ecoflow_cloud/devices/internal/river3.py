@@ -6,7 +6,7 @@ from homeassistant.helpers.entity import EntityCategory  # pyright: ignore[repor
 
 from custom_components.ecoflow_cloud.api import EcoflowApiClient
 from custom_components.ecoflow_cloud.devices import BaseDevice, const
-from custom_components.ecoflow_cloud.devices.internal.proto import ef_dp3_iobroker_pb2 as pb2
+from custom_components.ecoflow_cloud.devices.internal.proto import ef_river3_pb2 as pb2
 from custom_components.ecoflow_cloud.entities import (
     BaseNumberEntity,
     BaseSelectEntity,
@@ -120,11 +120,9 @@ class River3(BaseDevice):
             # Power Input/Output
             InWattsSensorEntity(client, self, "pow_in_sum_w", const.TOTAL_IN_POWER).with_energy(),
             OutWattsSensorEntity(client, self, "pow_out_sum_w", const.TOTAL_OUT_POWER).with_energy(),
-            # Solar Input
-            # Note: River 3 has single PV, but uses same proto as DP3 which has dual (pv_h/pv_l)
-            # Try pow_get_pv_h first as that's what the proto defines
-            InWattsSensorEntity(client, self, "pow_get_pv_h", const.SOLAR_IN_POWER),
-            InMilliampSensorEntity(client, self, "plug_in_info_pv_h_amp", const.SOLAR_IN_CURRENT),
+            # Solar Input - River 3 has single PV input
+            InWattsSensorEntity(client, self, "pow_get_pv", const.SOLAR_IN_POWER),
+            InMilliampSensorEntity(client, self, "plug_in_info_pv_amp", const.SOLAR_IN_CURRENT),
             # AC Input/Output
             InWattsSensorEntity(client, self, "pow_get_ac_in", const.AC_IN_POWER),
             OutWattsAbsSensorEntity(client, self, "pow_get_ac", const.AC_OUT_POWER),
@@ -440,16 +438,16 @@ class River3(BaseDevice):
             except Exception:
                 _LOGGER.debug("Data is not Base64 encoded, using as-is")
 
-            # Try to decode as HeaderMessage
+            # Try to decode as River3HeaderMessage
             try:
-                header_msg = pb2.HeaderMessage()
+                header_msg = pb2.River3HeaderMessage()
                 header_msg.ParseFromString(raw_data)
             except AttributeError as e:
-                _LOGGER.error(f"HeaderMessage class not found in pb2 module: {e}")
+                _LOGGER.error(f"River3HeaderMessage class not found in pb2 module: {e}")
                 _LOGGER.debug(f"Available classes in pb2: {[attr for attr in dir(pb2) if not attr.startswith('_')]}")
                 return None
             except Exception as e:
-                _LOGGER.error(f"Failed to parse HeaderMessage: {e}")
+                _LOGGER.error(f"Failed to parse River3HeaderMessage: {e}")
                 _LOGGER.debug(f"Raw data length: {len(raw_data)}, first 20 bytes: {raw_data[:20].hex()}")
                 return None
 
@@ -537,31 +535,31 @@ class River3(BaseDevice):
             _LOGGER.debug(f"Decoding message: cmdFunc={cmd_func}, cmdId={cmd_id}, size={len(pdata)} bytes")
 
             if cmd_func == 254 and cmd_id == 21:
-                # DisplayPropertyUpload - main status and settings
-                msg = pb2.DisplayPropertyUpload()
+                # River3DisplayPropertyUpload - main status and settings
+                msg = pb2.River3DisplayPropertyUpload()
                 msg.ParseFromString(pdata)
                 return self._protobuf_to_dict(msg)
 
             elif cmd_func == 254 and cmd_id == 22:
-                # RuntimePropertyUpload - runtime sensor data
-                msg = pb2.RuntimePropertyUpload()
+                # River3RuntimePropertyUpload - runtime sensor data
+                msg = pb2.River3RuntimePropertyUpload()
                 msg.ParseFromString(pdata)
                 return self._protobuf_to_dict(msg)
 
             elif cmd_func == 254 and cmd_id == 17:
                 # Set command (from app/HA to device)
                 try:
-                    msg = pb2.set_dp3()
+                    msg = pb2.River3SetCommand()
                     msg.ParseFromString(pdata)
                     return self._protobuf_to_dict(msg)
                 except Exception as e:
-                    _LOGGER.debug(f"Failed to decode as set_dp3: {e}")
+                    _LOGGER.debug(f"Failed to decode as River3SetCommand: {e}")
                     return {}
 
             elif cmd_func == 254 and cmd_id == 18:
                 # Set reply (confirmation from device)
                 try:
-                    msg = pb2.setReply_dp3()
+                    msg = pb2.River3SetReply()
                     msg.ParseFromString(pdata)
                     result = self._protobuf_to_dict(msg)
                     # Only process if config was successful
@@ -571,47 +569,47 @@ class River3(BaseDevice):
                         _LOGGER.debug(f"Set reply indicates config not OK: {result}")
                         return {}
                 except Exception as e:
-                    _LOGGER.debug(f"Failed to decode as setReply_dp3: {e}")
+                    _LOGGER.debug(f"Failed to decode as River3SetReply: {e}")
                     return {}
 
             elif cmd_func == 32 and cmd_id == 2:
-                # CMSHeartBeatReport (CMS = Combined Management System)
+                # River3CMSHeartBeatReport (CMS = Combined Management System)
                 try:
-                    msg = pb2.cmdFunc32_cmdId2_Report()
+                    msg = pb2.River3CMSHeartBeatReport()
                     msg.ParseFromString(pdata)
                     return self._protobuf_to_dict(msg)
                 except Exception as e:
-                    _LOGGER.debug(f"Failed to decode as cmdFunc32_cmdId2_Report: {e}")
+                    _LOGGER.debug(f"Failed to decode as River3CMSHeartBeatReport: {e}")
                     return {}
 
             elif self._is_bms_heartbeat(cmd_func, cmd_id):
-                # BMSHeartBeatReport - Battery heartbeat with cycles and energy data
+                # River3BMSHeartBeatReport - Battery heartbeat with cycles and energy data
                 try:
-                    msg = pb2.BMSHeartBeatReport()
+                    msg = pb2.River3BMSHeartBeatReport()
                     msg.ParseFromString(pdata)
-                    _LOGGER.debug(f"Successfully decoded BMSHeartBeatReport: cmdFunc={cmd_func}, cmdId={cmd_id}")
+                    _LOGGER.debug(f"Successfully decoded River3BMSHeartBeatReport: cmdFunc={cmd_func}, cmdId={cmd_id}")
                     return self._protobuf_to_dict(msg)
                 except Exception as e:
-                    _LOGGER.debug(f"Failed to decode as BMSHeartBeatReport (cmdFunc={cmd_func}, cmdId={cmd_id}): {e}")
+                    _LOGGER.debug(f"Failed to decode as River3BMSHeartBeatReport (cmdFunc={cmd_func}, cmdId={cmd_id}): {e}")
                     return {}
 
-            # Unknown message type - try BMSHeartBeatReport as fallback
+            # Unknown message type - try River3BMSHeartBeatReport as fallback
             _LOGGER.debug(f"Unknown message type: cmdFunc={cmd_func}, cmdId={cmd_id}, size={len(pdata)} bytes")
 
-            # Try to decode as BMSHeartBeatReport since that's a common case
+            # Try to decode as River3BMSHeartBeatReport since that's a common case
             try:
-                msg = pb2.BMSHeartBeatReport()
+                msg = pb2.River3BMSHeartBeatReport()
                 msg.ParseFromString(pdata)
                 result = self._protobuf_to_dict(msg)
                 # Check if we got meaningful data (cycles or energy fields)
                 if "cycles" in result or "accu_chg_energy" in result or "accu_dsg_energy" in result:
-                    _LOGGER.warning(
-                        f"Found BMSHeartBeatReport at unexpected cmdFunc={cmd_func}, cmdId={cmd_id}. "
+                    _LOGGER.info(
+                        f"Found River3BMSHeartBeatReport at unexpected cmdFunc={cmd_func}, cmdId={cmd_id}. "
                         f"Consider updating BMS_HEARTBEAT_COMMANDS mapping."
                     )
                     return result
             except Exception as e:
-                _LOGGER.debug(f"Failed fallback BMSHeartBeatReport decode: {e}")
+                _LOGGER.debug(f"Failed fallback River3BMSHeartBeatReport decode: {e}")
 
             return {}
 
