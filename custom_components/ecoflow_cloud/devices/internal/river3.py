@@ -1,54 +1,53 @@
 import logging
-from typing import Any, cast, override
+from typing import Any, override
 
-from homeassistant.components.binary_sensor import BinarySensorDeviceClass # pyright: ignore[reportMissingImports]
-from homeassistant.helpers.entity import EntityCategory # pyright: ignore[reportMissingImports]
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass  # pyright: ignore[reportMissingImports]
+from homeassistant.helpers.entity import EntityCategory  # pyright: ignore[reportMissingImports]
 
 from custom_components.ecoflow_cloud.api import EcoflowApiClient
-from custom_components.ecoflow_cloud.api.message import JSONDict
-from custom_components.ecoflow_cloud.devices import const, BaseDevice
-from custom_components.ecoflow_cloud.devices.const import ATTR_DESIGN_CAPACITY, ATTR_FULL_CAPACITY, ATTR_REMAIN_CAPACITY, BATTERY_CHARGING_STATE, \
-    MAIN_DESIGN_CAPACITY, MAIN_FULL_CAPACITY, MAIN_REMAIN_CAPACITY
-from custom_components.ecoflow_cloud.entities import BaseSensorEntity, BaseNumberEntity, BaseSwitchEntity, BaseSelectEntity
-from custom_components.ecoflow_cloud.number import ChargingPowerEntity, MaxBatteryLevelEntity, MinBatteryLevelEntity, BatteryBackupLevel
+from custom_components.ecoflow_cloud.devices import BaseDevice, const
+from custom_components.ecoflow_cloud.devices.internal.proto import ef_dp3_iobroker_pb2 as pb2
+from custom_components.ecoflow_cloud.entities import (
+    BaseNumberEntity,
+    BaseSelectEntity,
+    BaseSensorEntity,
+    BaseSwitchEntity,
+)
+from custom_components.ecoflow_cloud.number import (
+    BatteryBackupLevel,
+    ChargingPowerEntity,
+    MaxBatteryLevelEntity,
+    MinBatteryLevelEntity,
+)
 from custom_components.ecoflow_cloud.select import DictSelectEntity, TimeoutDictSelectEntity
-from custom_components.ecoflow_cloud.sensor import LevelSensorEntity, RemainSensorEntity, TempSensorEntity, \
-    InWattsSensorEntity, OutWattsSensorEntity, VoltSensorEntity, InMilliampSensorEntity, \
-    InVoltSensorEntity, MilliVoltSensorEntity, CapacitySensorEntity, StatusSensorEntity, \
-    QuotaStatusSensorEntity, OutVoltSensorEntity
+from custom_components.ecoflow_cloud.sensor import (
+    CapacitySensorEntity,
+    InMilliampSensorEntity,
+    InVoltSensorEntity,
+    InWattsSensorEntity,
+    LevelSensorEntity,
+    MilliVoltSensorEntity,
+    OutWattsSensorEntity,
+    QuotaStatusSensorEntity,
+    RemainSensorEntity,
+    TempSensorEntity,
+    VoltSensorEntity,
+)
 from custom_components.ecoflow_cloud.switch import BeeperEntity, EnabledEntity
-from homeassistant.util import dt
-
-from .proto.support.const import Command, CommandFuncAndId, get_expected_payload_type
-from .proto.support.message import ProtoMessage
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _decode_varint(data: bytes, start_idx: int) -> tuple[int, int]:
-    result = 0
-    shift = 0
-    idx = start_idx
-    
-    while idx < len(data):
-        byte = data[idx]
-        result |= (byte & 0x7F) << shift
-        idx += 1
-        if (byte & 0x80) == 0:
-            break
-        shift += 7
-    
-    return result, idx
-
-
 class River3ChargingStateSensorEntity(BaseSensorEntity):
+    """Sensor for battery charging state."""
+
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:battery-charging"
     _attr_device_class = BinarySensorDeviceClass.BATTERY_CHARGING
 
     def _update_value(self, val: Any) -> bool:
         if val == 0:
-            return super()._update_value("unused")
+            return super()._update_value("idle")
         elif val == 1:
             return super()._update_value("discharging")
         elif val == 2:
@@ -58,322 +57,570 @@ class River3ChargingStateSensorEntity(BaseSensorEntity):
 
 
 class OutWattsAbsSensorEntity(OutWattsSensorEntity):
+    """Output power sensor that uses absolute value."""
+
     def _update_value(self, val: Any) -> bool:
         return super()._update_value(abs(int(val)))
 
 
-def _create_river3_proto_command(field_name: str, value: int, device_sn: str, data_len: int = 3):
-    from .proto.ecopacket_pb2 import SendHeaderMsg
-    from .proto.support.message import ProtoMessage
-    import time
-    
-    packet = SendHeaderMsg()
-    message = packet.msg.add()
-    
-    message.src = 32
-    message.dest = 2
-    message.d_src = 1
-    message.d_dest = 1
-    message.cmd_func = 254
-    message.cmd_id = 17
-    message.need_ack = 1
-    message.seq = int(time.time() * 1000) % 2147483647
-    message.product_id = 1
-    message.version = 19
-    message.payload_ver = 1
-    message.device_sn = device_sn
-    message.data_len = data_len
-    
-    field_numbers = {
-        'en_beep': 9,
-        'cfg_dc12v_out_open': 18,
-        'xboost_en': 25,
-        'cms_max_chg_soc': 33,
-        'cms_min_dsg_soc': 34,
-        'plug_in_info_ac_in_chg_pow_max': 54,
-        'cfg_ac_out_open': 76,
-        'plug_in_info_pv_dc_amp_max': 87,
-        'pv_chg_type': 90,
-        'output_power_off_memory': 141,
-    }
-    
-    if field_name not in field_numbers:
-        _LOGGER.error(f"Unknown set_dp3 field: {field_name}")
-    
-    pdata = bytearray()
-    
-    if field_name in field_numbers:
-        field_num = field_numbers[field_name]
-        field_key = (field_num << 3) | 0
-        
-        while field_key > 0x7F:
-            pdata.append((field_key & 0x7F) | 0x80)
-            field_key >>= 7
-        pdata.append(field_key & 0x7F)
-        
-        val = int(value)
-        if val < 0:
-            val = val & 0xFFFFFFFF
-        while val > 0x7F:
-            pdata.append((val & 0x7F) | 0x80)
-            val >>= 7
-        pdata.append(val & 0x7F)
-    
-    message.pdata = bytes(pdata)
-    
-    class River3CommandMessage(ProtoMessage):
-        def __init__(self, packet: SendHeaderMsg):
-            super().__init__(command=None, payload=None)
-            self._packet = packet
-        
-        def private_api_to_mqtt_payload(self):
-            return self._packet.SerializeToString()
-    
-    return River3CommandMessage(packet)
-
-
 class River3(BaseDevice):
+    """EcoFlow River 3 device implementation using protobuf decoding.
+
+    River 3 is a portable power station from the same generation as Delta Pro 3,
+    sharing similar protobuf message structures for data communication.
+
+    Message Types:
+    - cmdFunc=254, cmdId=21: DisplayPropertyUpload (main status/settings)
+    - cmdFunc=254, cmdId=22: RuntimePropertyUpload (runtime sensor data)
+    - cmdFunc=254, cmdId=17: Set commands
+    - cmdFunc=254, cmdId=18: Set reply confirmation
+    """
 
     @staticmethod
     def default_charging_power_step() -> int:
         return 50
 
     @override
-    def _prepare_data(self, raw_data: bytes) -> dict[str, Any]:
-        res: dict[str, Any] = {"params": {}}
-        from google.protobuf.json_format import MessageToDict
-        from .proto.support import flatten_dict
-
-        from .proto.ecopacket_pb2 import SendHeaderMsg
-        from .proto.support.const import Command, CommandFuncAndId
-
-        try:
-            packet = SendHeaderMsg()
-            _ = packet.ParseFromString(raw_data)
-            for message in packet.msg:
-                if (
-                    message.HasField("device_sn")
-                    and message.device_sn != self.device_data.sn
-                ):
-                    continue
-
-                command_desc = CommandFuncAndId(
-                    func=message.cmd_func, id=message.cmd_id
-                )
-
-                try:
-                    command = Command(command_desc)
-                except ValueError:
-                    continue
-
-                params = cast(JSONDict, res.setdefault("params", {}))
-                if command in {Command.PRIVATE_API_SMART_METER_DISPLAY_PROPERTY_UPLOAD, Command.PRIVATE_API_SMART_METER_RUNTIME_PROPERTY_UPLOAD}:
-                    payload = get_expected_payload_type(command)()
-                    try:
-                        if message.enc_type == 1:
-                            message.pdata = bytes([byte ^ (message.seq % 256) for byte in message.pdata])
-
-                        _ = payload.ParseFromString(message.pdata)
-                        flattened = cast(
-                            JSONDict,
-                            flatten_dict(MessageToDict(payload, preserving_proto_field_name=False)),
-                        )
-                        
-                        params.update(
-                            (f"{command.func}_{command.id}.{key}", value)
-                            for key, value in flattened.items()
-                        )
-                    except Exception as e:
-                        _LOGGER.error(f"Error parsing protobuf payload for {command.name}: {e}", exc_info=True)
-                
-                elif command_desc.func == 254 and command_desc.id in (17, 18):
-                    try:
-                        if message.enc_type == 1:
-                            message.pdata = bytes([byte ^ (message.seq % 256) for byte in message.pdata])
-                        
-                        pdata = message.pdata
-                        idx = 0
-                        parsed_fields = {}
-                        
-                        while idx < len(pdata):
-                            field_key, idx = _decode_varint(pdata, idx)
-                            field_num = field_key >> 3
-                            wire_type = field_key & 0x7
-                            
-                            if wire_type == 0:
-                                value, idx = _decode_varint(pdata, idx)
-                                parsed_fields[field_num] = value
-                            elif wire_type == 2:
-                                length, idx = _decode_varint(pdata, idx)
-                                idx += length
-                            else:
-                                break
-                        
-                        field_name_map = {
-                            9: 'enBeep',
-                            18: 'cfgDc12vOutOpen',
-                            25: 'xboostEn',
-                            33: 'cmsMaxChgSoc',
-                            34: 'cmsMinDsgSoc',
-                            54: 'plugInInfoAcInChgPowMax',
-                            74: 'dcOutOpen',
-                            76: 'cfgAcOutOpen',
-                            87: 'plugInInfoPvDcAmpMax',
-                            90: 'pvChgType',
-                            141: 'outputPowerOffMemory',
-                        }
-                        
-                        if command_desc.id == 18:
-                            config_ok = parsed_fields.get(2, 0)
-                            if not config_ok:
-                                continue
-                        
-                        for field_num, value in parsed_fields.items():
-                            if field_num in field_name_map:
-                                state_name = field_name_map[field_num]
-                                params[f"254_21.{state_name}"] = value
-                    except Exception as e:
-                        _LOGGER.error(f"Error parsing set_dp3 payload: {e}", exc_info=True)
-                        
-                res["timestamp"] = dt.utcnow()
-        except Exception as error:
-            _LOGGER.error(error)
-        return res
-
     def sensors(self, client: EcoflowApiClient) -> list[BaseSensorEntity]:
         return [
-            LevelSensorEntity(client, self, "254_21.bmsBattSoc", const.MAIN_BATTERY_LEVEL)
-                .attr("254_21.bmsDesignCap", ATTR_DESIGN_CAPACITY, 0)
-                .attr("254_22.bmsFullCap", ATTR_FULL_CAPACITY, 0)
-                .attr("254_22.bmsRemainCap", ATTR_REMAIN_CAPACITY, 0),
-            CapacitySensorEntity(client, self, "254_21.bmsDesignCap", MAIN_DESIGN_CAPACITY, False),
-            CapacitySensorEntity(client, self, "254_22.bmsFullCap", MAIN_FULL_CAPACITY, False),
-            CapacitySensorEntity(client, self, "254_22.bmsRemainCap", MAIN_REMAIN_CAPACITY, False),
-
-            LevelSensorEntity(client, self, "254_21.bmsBattSoh", const.SOH),
-
-            LevelSensorEntity(client, self, "254_21.cmsBattSoc", const.COMBINED_BATTERY_LEVEL),
-
-            River3ChargingStateSensorEntity(client, self, "254_21.bmsChgDsgState", BATTERY_CHARGING_STATE),
-
-            InWattsSensorEntity(client, self, "254_21.powInSumW", const.TOTAL_IN_POWER).with_energy(),
-            OutWattsSensorEntity(client, self, "254_21.powOutSumW", const.TOTAL_OUT_POWER).with_energy(),
-
-            InMilliampSensorEntity(client, self, "254_22.plugInInfoPvAmp", const.SOLAR_IN_CURRENT),
-
-            InWattsSensorEntity(client, self, "254_21.powGetAcIn", const.AC_IN_POWER),
-            OutWattsAbsSensorEntity(client, self, "254_21.powGetAcOut", const.AC_OUT_POWER),
-
-            InVoltSensorEntity(client, self, "254_22.plugInInfoAcInVol", const.AC_IN_VOLT),
-            OutVoltSensorEntity(client, self, "254_22.plugInInfoAcOutVol", const.AC_OUT_VOLT),
-
-            InWattsSensorEntity(client, self, "254_21.powGetPv", const.SOLAR_IN_POWER),
-
-            OutWattsSensorEntity(client, self, "254_21.powGet_12v", const.DC_OUT_POWER),
-            OutWattsAbsSensorEntity(client, self, "254_21.powGetTypec1", const.TYPEC_1_OUT_POWER),
-            OutWattsAbsSensorEntity(client, self, "254_21.powGetQcusb1", const.USB_QC_1_OUT_POWER),
-            OutWattsAbsSensorEntity(client, self, "254_21.powGetQcusb2", const.USB_QC_2_OUT_POWER),
-
-            RemainSensorEntity(client, self, "254_21.bmsChgRemTime", const.CHARGE_REMAINING_TIME),
-            RemainSensorEntity(client, self, "254_21.bmsDsgRemTime", const.DISCHARGE_REMAINING_TIME),
-            RemainSensorEntity(client, self, "254_21.cmsChgRemTime", const.REMAINING_TIME),
-
-            TempSensorEntity(client, self, "254_22.tempPcsDc", "PCS DC Temperature"),
-            TempSensorEntity(client, self, "254_22.tempPcsAc", "PCS AC Temperature"),
-
-            TempSensorEntity(client, self, "254_21.bmsMinCellTemp", const.BATTERY_TEMP)
-                .attr("254_21.bmsMaxCellTemp", const.ATTR_MAX_CELL_TEMP, 0),
-            TempSensorEntity(client, self, "254_21.bmsMaxCellTemp", const.MAX_CELL_TEMP, False),
-
-            VoltSensorEntity(client, self, "254_22.bmsBattVol", const.BATTERY_VOLT, False)
-                .attr("254_22.bmsMinCellVol", const.ATTR_MIN_CELL_VOLT, 0)
-                .attr("254_22.bmsMaxCellVol", const.ATTR_MAX_CELL_VOLT, 0),
-            MilliVoltSensorEntity(client, self, "254_22.bmsMinCellVol", const.MIN_CELL_VOLT, False),
-            MilliVoltSensorEntity(client, self, "254_22.bmsMaxCellVol", const.MAX_CELL_VOLT, False),
-
-            self._status_sensor(client),
-
+            # Main Battery System
+            LevelSensorEntity(client, self, "bms_batt_soc", const.MAIN_BATTERY_LEVEL)
+            .attr("bms_design_cap", const.ATTR_DESIGN_CAPACITY, 0)
+            .attr("bms_full_cap", const.ATTR_FULL_CAPACITY, 0)
+            .attr("bms_remain_cap", const.ATTR_REMAIN_CAPACITY, 0),
+            CapacitySensorEntity(client, self, "bms_design_cap", const.MAIN_DESIGN_CAPACITY, False),
+            CapacitySensorEntity(client, self, "bms_full_cap", const.MAIN_FULL_CAPACITY, False),
+            CapacitySensorEntity(client, self, "bms_remain_cap", const.MAIN_REMAIN_CAPACITY, False),
+            LevelSensorEntity(client, self, "bms_batt_soh", const.SOH),
+            # Combined Battery Level (for expansion batteries)
+            LevelSensorEntity(client, self, "cms_batt_soc", const.COMBINED_BATTERY_LEVEL),
+            # Charging State
+            River3ChargingStateSensorEntity(client, self, "bms_chg_dsg_state", const.BATTERY_CHARGING_STATE),
+            # Power Input/Output
+            InWattsSensorEntity(client, self, "pow_in_sum_w", const.TOTAL_IN_POWER).with_energy(),
+            OutWattsSensorEntity(client, self, "pow_out_sum_w", const.TOTAL_OUT_POWER).with_energy(),
+            # Solar Input
+            # Note: River 3 has single PV, but uses same proto as DP3 which has dual (pv_h/pv_l)
+            # Try pow_get_pv_h first as that's what the proto defines
+            InWattsSensorEntity(client, self, "pow_get_pv_h", const.SOLAR_IN_POWER),
+            InMilliampSensorEntity(client, self, "plug_in_info_pv_h_amp", const.SOLAR_IN_CURRENT),
+            # AC Input/Output
+            InWattsSensorEntity(client, self, "pow_get_ac_in", const.AC_IN_POWER),
+            OutWattsAbsSensorEntity(client, self, "pow_get_ac", const.AC_OUT_POWER),
+            InVoltSensorEntity(client, self, "plug_in_info_ac_in_vol", const.AC_IN_VOLT),
+            # Note: AC output voltage sensor may not be available in proto
+            # DC Output
+            OutWattsSensorEntity(client, self, "pow_get_12v", const.DC_OUT_POWER),
+            # USB Output
+            OutWattsAbsSensorEntity(client, self, "pow_get_typec1", const.TYPEC_1_OUT_POWER),
+            OutWattsAbsSensorEntity(client, self, "pow_get_qcusb1", const.USB_QC_1_OUT_POWER),
+            OutWattsAbsSensorEntity(client, self, "pow_get_qcusb2", const.USB_QC_2_OUT_POWER),
+            # Remaining Time
+            RemainSensorEntity(client, self, "bms_chg_rem_time", const.CHARGE_REMAINING_TIME),
+            RemainSensorEntity(client, self, "bms_dsg_rem_time", const.DISCHARGE_REMAINING_TIME),
+            RemainSensorEntity(client, self, "cms_chg_rem_time", const.REMAINING_TIME),
+            # Temperature
+            TempSensorEntity(client, self, "temp_pcs_dc", "PCS DC Temperature"),
+            TempSensorEntity(client, self, "temp_pcs_ac", "PCS AC Temperature"),
+            TempSensorEntity(client, self, "bms_min_cell_temp", const.BATTERY_TEMP)
+            .attr("bms_max_cell_temp", const.ATTR_MAX_CELL_TEMP, 0),
+            TempSensorEntity(client, self, "bms_max_cell_temp", const.MAX_CELL_TEMP, False),
+            # Battery Voltage
+            VoltSensorEntity(client, self, "bms_batt_vol", const.BATTERY_VOLT, False)
+            .attr("bms_min_cell_vol", const.ATTR_MIN_CELL_VOLT, 0)
+            .attr("bms_max_cell_vol", const.ATTR_MAX_CELL_VOLT, 0),
+            MilliVoltSensorEntity(client, self, "bms_min_cell_vol", const.MIN_CELL_VOLT, False),
+            MilliVoltSensorEntity(client, self, "bms_max_cell_vol", const.MAX_CELL_VOLT, False),
+            # Status
+            QuotaStatusSensorEntity(client, self),
         ]
 
+    @override
     def numbers(self, client: EcoflowApiClient) -> list[BaseNumberEntity]:
         return [
-            MaxBatteryLevelEntity(client, self, "254_21.cmsMaxChgSoc", const.MAX_CHARGE_LEVEL, 50, 100,
-                                  lambda value: {"moduleType": 2, "operateType": "upsConfig",
-                                                 "params": {"maxChgSoc": int(value)}}),
-
-            MinBatteryLevelEntity(client, self, "254_21.cmsMinDsgSoc", const.MIN_DISCHARGE_LEVEL, 0, 30,
-                                  lambda value: {"moduleType": 2, "operateType": "dsgCfg",
-                                                 "params": {"minDsgSoc": int(value)}}),
-
-            ChargingPowerEntity(client, self, "254_21.plugInInfoAcInChgPowMax", const.AC_CHARGING_POWER, 50, 305,
-                                lambda value: {"moduleType": 5, "operateType": "acChgCfg",
-                                               "params": {"chgWatts": int(value), "chgPauseFlag": 255}}),
-
-            BatteryBackupLevel(client, self, "254_21.energyBackupStartSoc", const.BACKUP_RESERVE_LEVEL, 5, 100,
-                               "254_21.cmsMinDsgSoc", "254_21.cmsMaxChgSoc", 5,
-                               lambda value: {"moduleType": 1, "operateType": "watthConfig",
-                                              "params": {"isConfig": 1,
-                                                         "energyBackupStartSoc": int(value),
-                                                         "minDsgSoc": 0,
-                                                         "minChgSoc": 0}}),
+            MaxBatteryLevelEntity(
+                client,
+                self,
+                "cms_max_chg_soc",
+                const.MAX_CHARGE_LEVEL,
+                50,
+                100,
+                lambda value: {
+                    "moduleType": 2,
+                    "operateType": "upsConfig",
+                    "params": {"maxChgSoc": int(value)},
+                },
+            ),
+            MinBatteryLevelEntity(
+                client,
+                self,
+                "cms_min_dsg_soc",
+                const.MIN_DISCHARGE_LEVEL,
+                0,
+                30,
+                lambda value: {
+                    "moduleType": 2,
+                    "operateType": "dsgCfg",
+                    "params": {"minDsgSoc": int(value)},
+                },
+            ),
+            ChargingPowerEntity(
+                client,
+                self,
+                "plug_in_info_ac_in_chg_pow_max",
+                const.AC_CHARGING_POWER,
+                50,
+                305,
+                lambda value: {
+                    "moduleType": 5,
+                    "operateType": "acChgCfg",
+                    "params": {"chgWatts": int(value), "chgPauseFlag": 255},
+                },
+            ),
+            BatteryBackupLevel(
+                client,
+                self,
+                "energy_backup_start_soc",
+                const.BACKUP_RESERVE_LEVEL,
+                5,
+                100,
+                "cms_min_dsg_soc",
+                "cms_max_chg_soc",
+                5,
+                lambda value: {
+                    "moduleType": 1,
+                    "operateType": "watthConfig",
+                    "params": {
+                        "isConfig": 1,
+                        "energyBackupStartSoc": int(value),
+                        "minDsgSoc": 0,
+                        "minChgSoc": 0,
+                    },
+                },
+            ),
         ]
 
+    @override
     def switches(self, client: EcoflowApiClient) -> list[BaseSwitchEntity]:
-        device = self
         return [
-            BeeperEntity(client, self, "254_21.enBeep", const.BEEPER,
-                         lambda value: _create_river3_proto_command(
-                             "en_beep", 1 if value else 0, device.device_data.sn, data_len=2)),
-
-            EnabledEntity(client, self, "254_21.cfgAcOutOpen", const.AC_ENABLED,
-                          lambda value: _create_river3_proto_command(
-                              "cfg_ac_out_open", 1 if value else 0, device.device_data.sn)),
-
-            EnabledEntity(client, self, "254_21.xboostEn", const.XBOOST_ENABLED,
-                          lambda value: _create_river3_proto_command(
-                              "xboost_en", 1 if value else 0, device.device_data.sn)),
-
-            EnabledEntity(client, self, "254_21.dcOutOpen", const.DC_ENABLED,
-                          lambda value: _create_river3_proto_command(
-                              "cfg_dc12v_out_open", 1 if value else 0, device.device_data.sn)),
-
-            EnabledEntity(client, self, "254_21.outputPowerOffMemory", const.AC_ALWAYS_ENABLED,
-                          lambda value: _create_river3_proto_command(
-                              "output_power_off_memory", 1 if value else 0, device.device_data.sn)),
-
-            EnabledEntity(client, self, "254_21.energyBackupEn", const.BP_ENABLED,
-                          lambda value: _create_river3_proto_command(
-                              "energy_backup_en", 1 if value else 0, device.device_data.sn, data_len=7)),
+            # Beeper control - en_beep is in DisplayPropertyUpload (field 195)
+            BeeperEntity(
+                client,
+                self,
+                "en_beep",
+                const.BEEPER,
+                lambda value: {
+                    "moduleType": 5,
+                    "operateType": "beepSwitch",
+                    "params": {"enabled": 1 if value else 0},
+                },
+            ),
+            # AC Output - flow_info_ac_out indicates AC output flow direction
+            # cfg_ac_out_open is for set commands, but may not be in DisplayPropertyUpload
+            EnabledEntity(
+                client,
+                self,
+                "flow_info_dc2ac",  # Flow direction for DC to AC (output)
+                const.AC_ENABLED,
+                lambda value, params=None: {
+                    "moduleType": 5,
+                    "operateType": "acOutCfg",
+                    "params": {"enabled": 1 if value else 0},
+                },
+            ),
+            # X-Boost - xboost_en is in DisplayPropertyUpload (field 25)
+            EnabledEntity(
+                client,
+                self,
+                "xboost_en",
+                const.XBOOST_ENABLED,
+                lambda value, params=None: {
+                    "moduleType": 5,
+                    "operateType": "xboost",
+                    "params": {"xboost": 1 if value else 0},
+                },
+            ),
+            # DC Output - flow_info_12v indicates 12V DC flow (field 33)
+            EnabledEntity(
+                client,
+                self,
+                "flow_info_12v",
+                const.DC_ENABLED,
+                lambda value, params=None: {
+                    "moduleType": 5,
+                    "operateType": "dcOutCfg",
+                    "params": {"enabled": 1 if value else 0},
+                },
+            ),
+            # AC Always On - output_power_off_memory in DisplayPropertyUpload (field 147)
+            EnabledEntity(
+                client,
+                self,
+                "output_power_off_memory",
+                const.AC_ALWAYS_ENABLED,
+                lambda value, params=None: {
+                    "moduleType": 5,
+                    "operateType": "acAlwaysOn",
+                    "params": {"enabled": 1 if value else 0},
+                },
+            ),
+            # Backup Reserve - energy_backup_en in DisplayPropertyUpload (field 7)
+            EnabledEntity(
+                client,
+                self,
+                "energy_backup_en",
+                const.BP_ENABLED,
+                lambda value, params=None: {
+                    "moduleType": 1,
+                    "operateType": "watthConfig",
+                    "params": {"isConfig": 1 if value else 0},
+                },
+            ),
         ]
 
+    @override
     def selects(self, client: EcoflowApiClient) -> list[BaseSelectEntity]:
-        dc_charge_current_options = {
-            "4A": 4,
-            "6A": 6,
-            "8A": 8
-        }
-        
+        dc_charge_current_options = {"4A": 4, "6A": 6, "8A": 8}
+
         return [
-            DictSelectEntity(client, self, "254_21.plugInInfoPvDcAmpMax", const.DC_CHARGE_CURRENT, dc_charge_current_options,
-                             lambda value: {"moduleType": 5, "operateType": "dcChgCfg",
-                                            "params": {"dcChgCfg": value}}),
-
-            DictSelectEntity(client, self, "254_21.pvChgType", const.DC_MODE, const.DC_MODE_OPTIONS,
-                             lambda value: {"moduleType": 5, "operateType": "chaType",
-                                            "params": {"chaType": value}}),
-
-            TimeoutDictSelectEntity(client, self, "254_21.screenOffTime", const.SCREEN_TIMEOUT, const.SCREEN_TIMEOUT_OPTIONS,
-                                    lambda value: {"moduleType": 5, "operateType": "lcdCfg",
-                                                   "params": {"brighLevel": 255, "delayOff": value}}),
-
-            TimeoutDictSelectEntity(client, self, "254_21.devStandbyTime", const.UNIT_TIMEOUT, const.UNIT_TIMEOUT_OPTIONS,
-                                    lambda value: {"moduleType": 5, "operateType": "standby",
-                                                   "params": {"standbyMins": value}}),
-
-            TimeoutDictSelectEntity(client, self, "254_21.acStandbyTime", const.AC_TIMEOUT, const.AC_TIMEOUT_OPTIONS,
-                                    lambda value: {"moduleType": 5, "operateType": "acStandby",
-                                                   "params": {"standbyMins": value}})
+            DictSelectEntity(
+                client,
+                self,
+                "plug_in_info_pv_dc_amp_max",
+                const.DC_CHARGE_CURRENT,
+                dc_charge_current_options,
+                lambda value: {
+                    "moduleType": 5,
+                    "operateType": "dcChgCfg",
+                    "params": {"dcChgCfg": value},
+                },
+            ),
+            DictSelectEntity(
+                client,
+                self,
+                "pv_chg_type",
+                const.DC_MODE,
+                const.DC_MODE_OPTIONS,
+                lambda value: {
+                    "moduleType": 5,
+                    "operateType": "chaType",
+                    "params": {"chaType": value},
+                },
+            ),
+            TimeoutDictSelectEntity(
+                client,
+                self,
+                "screen_off_time",
+                const.SCREEN_TIMEOUT,
+                const.SCREEN_TIMEOUT_OPTIONS,
+                lambda value: {
+                    "moduleType": 5,
+                    "operateType": "lcdCfg",
+                    "params": {"brighLevel": 255, "delayOff": value},
+                },
+            ),
+            TimeoutDictSelectEntity(
+                client,
+                self,
+                "dev_standby_time",
+                const.UNIT_TIMEOUT,
+                const.UNIT_TIMEOUT_OPTIONS,
+                lambda value: {
+                    "moduleType": 5,
+                    "operateType": "standby",
+                    "params": {"standbyMins": value},
+                },
+            ),
+            TimeoutDictSelectEntity(
+                client,
+                self,
+                "ac_standby_time",
+                const.AC_TIMEOUT,
+                const.AC_TIMEOUT_OPTIONS,
+                lambda value: {
+                    "moduleType": 5,
+                    "operateType": "acStandby",
+                    "params": {"standbyMins": value},
+                },
+            ),
         ]
 
-    def _status_sensor(self, client: EcoflowApiClient) -> StatusSensorEntity:
-        return QuotaStatusSensorEntity(client, self)
+    @override
+    def _prepare_data(self, raw_data: bytes) -> dict[str, Any]:
+        """Prepare River 3 data by decoding protobuf and flattening fields.
+
+        Uses the same message structure as Delta Pro 3:
+        - HeaderMessage wrapper for all messages
+        - DisplayPropertyUpload for status/settings (cmdFunc=254, cmdId=21)
+        - RuntimePropertyUpload for runtime data (cmdFunc=254, cmdId=22)
+        """
+        _LOGGER.debug(f"[River3] _prepare_data called with {len(raw_data)} bytes")
+
+        flat_dict: dict[str, Any] | None = None
+        decoded_data: dict[str, Any] | None = None
+        try:
+            _LOGGER.debug(f"Processing {len(raw_data)} bytes of raw data")
+
+            # 1. Decode HeaderMessage
+            header_info = self._decode_header_message(raw_data)
+            if not header_info:
+                _LOGGER.warning("HeaderMessage decoding failed, trying JSON fallback")
+                return super()._prepare_data(raw_data)
+
+            # 2. Extract payload data
+            pdata = self._extract_payload_data(header_info.get("header_obj"))
+            if not pdata:
+                _LOGGER.warning("No payload data found")
+                return {}
+
+            # 3. XOR decode (if needed)
+            decoded_pdata = self._perform_xor_decode(pdata, header_info)
+
+            # 4. Protobuf message decode
+            decoded_data = self._decode_message_by_type(decoded_pdata, header_info)
+            if not decoded_data:
+                _LOGGER.warning("Message decoding failed")
+                return {}
+
+            # 5. Flatten all fields for params
+            flat_dict = self._flatten_dict(decoded_data)
+            _LOGGER.debug(f"Flat dict for params (all fields): {flat_dict}")  # noqa: G004
+        except Exception as e:
+            _LOGGER.error(f"[River3] Data processing failed: {e}", exc_info=True)
+            _LOGGER.debug("[River3] Attempting JSON fallback after protobuf failure")
+            # Fallback to parent's JSON processing for compatibility
+            try:
+                return super()._prepare_data(raw_data)
+            except Exception as e2:
+                _LOGGER.error(f"[River3] JSON fallback also failed: {e2}")
+                return {}
+
+        # Home Assistant expects a dict with 'params' on success
+        _LOGGER.debug(f"[River3] Successfully processed protobuf data, returning {len(flat_dict or {})} fields")
+        return {
+            "params": flat_dict or {},
+            "all_fields": decoded_data or {},
+        }
+
+    def _decode_header_message(self, raw_data: bytes) -> dict[str, Any] | None:
+        """Decode HeaderMessage and extract header info."""
+        try:
+            # Try Base64 decode first
+            import base64
+
+            try:
+                decoded_payload = base64.b64decode(raw_data, validate=True)
+                _LOGGER.debug("Base64 decode successful")
+                raw_data = decoded_payload
+            except Exception:
+                _LOGGER.debug("Data is not Base64 encoded, using as-is")
+
+            # Try to decode as HeaderMessage
+            try:
+                header_msg = pb2.HeaderMessage()
+                header_msg.ParseFromString(raw_data)
+            except AttributeError as e:
+                _LOGGER.error(f"HeaderMessage class not found in pb2 module: {e}")
+                _LOGGER.debug(f"Available classes in pb2: {[attr for attr in dir(pb2) if not attr.startswith('_')]}")
+                return None
+            except Exception as e:
+                _LOGGER.error(f"Failed to parse HeaderMessage: {e}")
+                _LOGGER.debug(f"Raw data length: {len(raw_data)}, first 20 bytes: {raw_data[:20].hex()}")
+                return None
+
+            if not header_msg.header:
+                _LOGGER.debug("No headers found in HeaderMessage")
+                return None
+
+            # Use the first header (usually single)
+            header = header_msg.header[0]
+            header_info = {
+                "src": getattr(header, "src", 0),
+                "dest": getattr(header, "dest", 0),
+                "dSrc": getattr(header, "d_src", 0),
+                "dDest": getattr(header, "d_dest", 0),
+                "encType": getattr(header, "enc_type", 0),
+                "checkType": getattr(header, "check_type", 0),
+                "cmdFunc": getattr(header, "cmd_func", 0),
+                "cmdId": getattr(header, "cmd_id", 0),
+                "dataLen": getattr(header, "data_len", 0),
+                "needAck": getattr(header, "need_ack", 0),
+                "seq": getattr(header, "seq", 0),
+                "productId": getattr(header, "product_id", 0),
+                "version": getattr(header, "version", 0),
+                "payloadVer": getattr(header, "payload_ver", 0),
+                "header_obj": header,
+            }
+
+            _LOGGER.debug(f"Header decoded: cmdFunc={header_info['cmdFunc']}, cmdId={header_info['cmdId']}")
+            return header_info
+
+        except Exception as e:
+            _LOGGER.debug(f"HeaderMessage decode failed: {e}")
+            return None
+
+    def _extract_payload_data(self, header_obj: Any) -> bytes | None:
+        """Extract payload bytes from header."""
+        try:
+            pdata = getattr(header_obj, "pdata", b"")
+            if pdata:
+                _LOGGER.debug(f"Extracted {len(pdata)} bytes of payload data")
+                return pdata
+            else:
+                _LOGGER.warning("No pdata found in header")
+                return None
+        except Exception as e:
+            _LOGGER.error(f"Payload extraction error: {e}")
+            return None
+
+    def _perform_xor_decode(self, pdata: bytes, header_info: dict[str, Any]) -> bytes:
+        """Perform XOR decoding if required by header info."""
+        enc_type = header_info.get("encType", 0)
+        src = header_info.get("src", 0)
+        seq = header_info.get("seq", 0)
+
+        # XOR decode condition: enc_type == 1 and src != 32
+        if enc_type == 1 and src != 32:
+            return self._xor_decode_pdata(pdata, seq)
+        else:
+            return pdata
+
+    def _xor_decode_pdata(self, pdata: bytes, seq: int) -> bytes:
+        """Apply XOR over payload with sequence value."""
+        if not pdata:
+            return b""
+
+        decoded_payload = bytearray()
+        for byte_val in pdata:
+            decoded_payload.append((byte_val ^ seq) & 0xFF)
+
+        return bytes(decoded_payload)
+
+    def _decode_message_by_type(self, pdata: bytes, header_info: dict[str, Any]) -> dict[str, Any]:
+        """Decode protobuf message based on cmdFunc/cmdId.
+
+        River 3 uses the same message types as Delta Pro 3:
+        - cmdFunc=254, cmdId=21: DisplayPropertyUpload
+        - cmdFunc=254, cmdId=22: RuntimePropertyUpload
+        - cmdFunc=254, cmdId=17: Set command
+        - cmdFunc=254, cmdId=18: Set reply
+        """
+        cmd_func = header_info.get("cmdFunc", 0)
+        cmd_id = header_info.get("cmdId", 0)
+
+        try:
+            _LOGGER.debug(f"Decoding message: cmdFunc={cmd_func}, cmdId={cmd_id}, size={len(pdata)} bytes")
+
+            if cmd_func == 254 and cmd_id == 21:
+                # DisplayPropertyUpload - main status and settings
+                msg = pb2.DisplayPropertyUpload()
+                msg.ParseFromString(pdata)
+                return self._protobuf_to_dict(msg)
+
+            elif cmd_func == 254 and cmd_id == 22:
+                # RuntimePropertyUpload - runtime sensor data
+                msg = pb2.RuntimePropertyUpload()
+                msg.ParseFromString(pdata)
+                return self._protobuf_to_dict(msg)
+
+            elif cmd_func == 254 and cmd_id == 17:
+                # Set command (from app/HA to device)
+                try:
+                    msg = pb2.set_dp3()
+                    msg.ParseFromString(pdata)
+                    return self._protobuf_to_dict(msg)
+                except Exception as e:
+                    _LOGGER.debug(f"Failed to decode as set_dp3: {e}")
+                    return {}
+
+            elif cmd_func == 254 and cmd_id == 18:
+                # Set reply (confirmation from device)
+                try:
+                    msg = pb2.setReply_dp3()
+                    msg.ParseFromString(pdata)
+                    result = self._protobuf_to_dict(msg)
+                    # Only process if config was successful
+                    if result.get("config_ok", False):
+                        return result
+                    else:
+                        _LOGGER.debug(f"Set reply indicates config not OK: {result}")
+                        return {}
+                except Exception as e:
+                    _LOGGER.debug(f"Failed to decode as setReply_dp3: {e}")
+                    return {}
+
+            elif cmd_func == 32 and cmd_id == 2:
+                # CMSHeartBeatReport (CMS = Combined Management System)
+                try:
+                    msg = pb2.cmdFunc32_cmdId2_Report()
+                    msg.ParseFromString(pdata)
+                    return self._protobuf_to_dict(msg)
+                except Exception as e:
+                    _LOGGER.debug(f"Failed to decode as cmdFunc32_cmdId2_Report: {e}")
+                    return {}
+
+            # Unknown message type
+            _LOGGER.warning(f"Unknown message type: cmdFunc={cmd_func}, cmdId={cmd_id}, size={len(pdata)} bytes")
+            return {}
+
+        except Exception as e:
+            _LOGGER.error(f"Message decode error for cmdFunc={cmd_func}, cmdId={cmd_id}: {e}")
+            return {}
+
+    def _flatten_dict(self, d: dict, parent_key: str = "", sep: str = "_") -> dict:
+        """Flatten nested dict with underscore separator."""
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.extend(self._flatten_dict(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
+    def _protobuf_to_dict(self, protobuf_obj: Any) -> dict[str, Any]:
+        """Convert protobuf message to dictionary."""
+        try:
+            from google.protobuf.json_format import MessageToDict
+
+            result = MessageToDict(protobuf_obj, preserving_proto_field_name=True)
+            _LOGGER.debug(f"MessageToDict result fields: {len(result)}")
+            return result
+        except ImportError:
+            result = self._manual_protobuf_to_dict(protobuf_obj)
+            _LOGGER.debug(f"Manual conversion result fields: {len(result)}")
+            return result
+
+    def _manual_protobuf_to_dict(self, protobuf_obj: Any) -> dict[str, Any]:
+        """Convert protobuf object to dict manually (fallback)."""
+        result = {}
+        for field, value in protobuf_obj.ListFields():
+            if field.label == field.LABEL_REPEATED:
+                result[field.name] = list(value)
+            elif hasattr(value, "ListFields"):  # nested message
+                result[field.name] = self._manual_protobuf_to_dict(value)
+            else:
+                result[field.name] = value
+        return result
+
+    @override
+    def update_data(self, raw_data, data_type: str) -> bool:
+        """Decode protobuf only for data_topic; otherwise use BaseDevice JSON path."""
+        if data_type == self.device_info.data_topic:
+            raw = self._prepare_data(raw_data)
+            self.data.update_data(raw)
+        elif data_type == self.device_info.set_topic:
+            raw = BaseDevice._prepare_data(self, raw_data)
+            self.data.add_set_message(raw)
+        elif data_type == self.device_info.set_reply_topic:
+            raw = BaseDevice._prepare_data(self, raw_data)
+            self.data.add_set_reply_message(raw)
+        elif data_type == self.device_info.get_topic:
+            raw = BaseDevice._prepare_data(self, raw_data)
+            self.data.add_get_message(raw)
+        elif data_type == self.device_info.get_reply_topic:
+            raw = BaseDevice._prepare_data(self, raw_data)
+            self.data.add_get_reply_message(raw)
+        else:
+            return False
+        return True
