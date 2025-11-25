@@ -37,6 +37,27 @@ from custom_components.ecoflow_cloud.switch import BeeperEntity, EnabledEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+# Message type mapping for BMS heartbeat related reports
+# These (cmdFunc, cmdId) pairs are known to map to BMSHeartBeatReport
+BMS_HEARTBEAT_COMMANDS: set[tuple[int, int]] = {
+    (3, 1),
+    (3, 2),
+    (3, 30),
+    (3, 50),
+    (32, 1),
+    (32, 3),
+    (32, 50),
+    (32, 51),
+    (32, 52),
+    (254, 24),
+    (254, 25),
+    (254, 26),
+    (254, 27),
+    (254, 28),
+    (254, 29),
+    (254, 30),
+}
+
 
 class River3ChargingStateSensorEntity(BaseSensorEntity):
     """Sensor for battery charging state."""
@@ -364,13 +385,13 @@ class River3(BaseDevice):
             # 1. Decode HeaderMessage
             header_info = self._decode_header_message(raw_data)
             if not header_info:
-                _LOGGER.warning("HeaderMessage decoding failed, trying JSON fallback")
+                _LOGGER.debug("HeaderMessage decoding failed, trying JSON fallback")
                 return super()._prepare_data(raw_data)
 
             # 2. Extract payload data
             pdata = self._extract_payload_data(header_info.get("header_obj"))
             if not pdata:
-                _LOGGER.warning("No payload data found")
+                _LOGGER.debug("No payload data found in header")
                 return {}
 
             # 3. XOR decode (if needed)
@@ -379,7 +400,11 @@ class River3(BaseDevice):
             # 4. Protobuf message decode
             decoded_data = self._decode_message_by_type(decoded_pdata, header_info)
             if not decoded_data:
-                _LOGGER.warning("Message decoding failed")
+                # Empty result is normal for some message types (set commands, unknown types)
+                # Only log at debug level since we already log specifics in _decode_message_by_type
+                cmd_func = header_info.get("cmdFunc", 0)
+                cmd_id = header_info.get("cmdId", 0)
+                _LOGGER.debug(f"No data extracted from message cmdFunc={cmd_func}, cmdId={cmd_id}")
                 return {}
 
             # 5. Flatten all fields for params
@@ -467,10 +492,10 @@ class River3(BaseDevice):
                 _LOGGER.debug(f"Extracted {len(pdata)} bytes of payload data")
                 return pdata
             else:
-                _LOGGER.warning("No pdata found in header")
+                _LOGGER.debug("No pdata found in header")
                 return None
         except Exception as e:
-            _LOGGER.error(f"Payload extraction error: {e}")
+            _LOGGER.debug(f"Payload extraction error: {e}")
             return None
 
     def _perform_xor_decode(self, pdata: bytes, header_info: dict[str, Any]) -> bytes:
@@ -559,13 +584,44 @@ class River3(BaseDevice):
                     _LOGGER.debug(f"Failed to decode as cmdFunc32_cmdId2_Report: {e}")
                     return {}
 
-            # Unknown message type
-            _LOGGER.warning(f"Unknown message type: cmdFunc={cmd_func}, cmdId={cmd_id}, size={len(pdata)} bytes")
+            elif self._is_bms_heartbeat(cmd_func, cmd_id):
+                # BMSHeartBeatReport - Battery heartbeat with cycles and energy data
+                try:
+                    msg = pb2.BMSHeartBeatReport()
+                    msg.ParseFromString(pdata)
+                    _LOGGER.debug(f"Successfully decoded BMSHeartBeatReport: cmdFunc={cmd_func}, cmdId={cmd_id}")
+                    return self._protobuf_to_dict(msg)
+                except Exception as e:
+                    _LOGGER.debug(f"Failed to decode as BMSHeartBeatReport (cmdFunc={cmd_func}, cmdId={cmd_id}): {e}")
+                    return {}
+
+            # Unknown message type - try BMSHeartBeatReport as fallback
+            _LOGGER.debug(f"Unknown message type: cmdFunc={cmd_func}, cmdId={cmd_id}, size={len(pdata)} bytes")
+
+            # Try to decode as BMSHeartBeatReport since that's a common case
+            try:
+                msg = pb2.BMSHeartBeatReport()
+                msg.ParseFromString(pdata)
+                result = self._protobuf_to_dict(msg)
+                # Check if we got meaningful data (cycles or energy fields)
+                if "cycles" in result or "accu_chg_energy" in result or "accu_dsg_energy" in result:
+                    _LOGGER.warning(
+                        f"Found BMSHeartBeatReport at unexpected cmdFunc={cmd_func}, cmdId={cmd_id}. "
+                        f"Consider updating BMS_HEARTBEAT_COMMANDS mapping."
+                    )
+                    return result
+            except Exception as e:
+                _LOGGER.debug(f"Failed fallback BMSHeartBeatReport decode: {e}")
+
             return {}
 
         except Exception as e:
             _LOGGER.error(f"Message decode error for cmdFunc={cmd_func}, cmdId={cmd_id}: {e}")
             return {}
+
+    def _is_bms_heartbeat(self, cmd_func: int, cmd_id: int) -> bool:
+        """Return True if the pair maps to a BMSHeartBeatReport message."""
+        return (cmd_func, cmd_id) in BMS_HEARTBEAT_COMMANDS
 
     def _flatten_dict(self, d: dict, parent_key: str = "", sep: str = "_") -> dict:
         """Flatten nested dict with underscore separator."""
