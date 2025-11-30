@@ -37,6 +37,179 @@ from custom_components.ecoflow_cloud.switch import BeeperEntity, EnabledEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _encode_varint(val: int) -> bytes:
+    """Encode an integer as a protobuf varint."""
+    result = bytearray()
+    if val < 0:
+        val = val & 0xFFFFFFFF
+    while val > 0x7F:
+        result.append((val & 0x7F) | 0x80)
+        val >>= 7
+    result.append(val & 0x7F)
+    return bytes(result)
+
+
+def _create_river3_proto_command(field_name: str, value: int, device_sn: str, data_len: int | None = None):
+    """Create a protobuf command for River 3.
+    
+    River 3 uses direct protobuf commands (not JSON) for all controllable entities.
+    This function builds the proper SendHeaderMsg with the field encoded in pdata.
+    
+    Based on ioBroker JS implementation: all controls use cmdFunc=254, cmdId=17.
+    """
+    from .proto.ecopacket_pb2 import SendHeaderMsg
+    from .proto.support.message import ProtoMessage
+    import time
+    
+    # Field numbers from the proto definition (River3SetCommand) - from JS set_dp3
+    # Maps field_name -> (field_number, default_data_len)
+    field_config = {
+        # Switches
+        'en_beep': (9, 2),
+        'ac_standby_time': (10, 3),  # Can be 2 if value <= 128
+        'dc_standby_time': (11, 3),
+        'screen_off_time': (12, 3),  # Can be 2 if value <= 128
+        'dev_standby_time': (13, 3), # Can be 2 if value <= 128
+        'lcd_light': (14, 2),
+        'cfg_dc12v_out_open': (18, 3),
+        'xboost_en': (25, 3),
+        'cms_max_chg_soc': (33, 3),
+        'cms_min_dsg_soc': (34, 3),
+        'plug_in_info_ac_in_chg_pow_max': (54, 4),  # Can be 3 if value <= 128
+        'cfg_ac_out_open': (76, 3),
+        'plug_in_info_pv_dc_amp_max': (87, 3),
+        'pv_chg_type': (90, 3),
+        'output_power_off_memory': (141, 3),
+    }
+    
+    if field_name not in field_config:
+        _LOGGER.error(f"Unknown River3 set field: {field_name}")
+        return None
+    
+    field_num, default_data_len = field_config[field_name]
+    
+    # Dynamic data_len calculation based on JS implementation
+    val = int(value)
+    if data_len is None:
+        # Follow JS logic for variable-length fields
+        if field_name == 'plug_in_info_ac_in_chg_pow_max':
+            data_len = 4 if val > 128 else 3
+        elif field_name in ('ac_standby_time', 'dev_standby_time', 'screen_off_time'):
+            data_len = 3 if val > 128 else 2
+        else:
+            data_len = default_data_len
+    
+    packet = SendHeaderMsg()
+    message = packet.msg.add()
+    
+    message.src = 32
+    message.dest = 2
+    message.d_src = 1
+    message.d_dest = 1
+    message.cmd_func = 254
+    message.cmd_id = 17
+    message.need_ack = 1
+    message.seq = int(time.time() * 1000) % 2147483647
+    message.product_id = 1
+    message.version = 19
+    message.payload_ver = 1
+    message.device_sn = device_sn
+    message.data_len = data_len
+    
+    # Build pdata: field key (varint) + value (varint)
+    pdata = bytearray()
+    
+    field_key = (field_num << 3) | 0  # wire type 0 = varint
+    pdata.extend(_encode_varint(field_key))
+    pdata.extend(_encode_varint(val))
+    
+    message.pdata = bytes(pdata)
+    
+    class River3CommandMessage(ProtoMessage):
+        def __init__(self, packet: SendHeaderMsg):
+            super().__init__(command=None, payload=None)
+            self._packet = packet
+        
+        def private_api_to_mqtt_payload(self):
+            return self._packet.SerializeToString()
+    
+    return River3CommandMessage(packet)
+
+
+def _create_river3_energy_backup_command(
+    energy_backup_en: int | None, 
+    energy_backup_start_soc: int,
+    device_sn: str
+):
+    """Create a protobuf command for River 3 energy backup settings.
+    
+    Energy backup uses a nested cfgEnergyBackup message (field 43) containing:
+    - energy_backup_en (field 1): enable/disable backup
+    - energy_backup_start_soc (field 2): SOC threshold
+    
+    Based on JS implementation:
+    - When enabling: send both fields, data_len=7
+    - When disabling: send only energy_backup_start_soc (no enable field), data_len=5
+    """
+    from .proto.ecopacket_pb2 import SendHeaderMsg
+    from .proto.support.message import ProtoMessage
+    import time
+    
+    packet = SendHeaderMsg()
+    message = packet.msg.add()
+    
+    message.src = 32
+    message.dest = 2
+    message.d_src = 1
+    message.d_dest = 1
+    message.cmd_func = 254
+    message.cmd_id = 17
+    message.need_ack = 1
+    message.seq = int(time.time() * 1000) % 2147483647
+    message.product_id = 1
+    message.version = 19
+    message.payload_ver = 1
+    message.device_sn = device_sn
+    
+    # Build nested cfgEnergyBackup message (field 43, wire type 2 = length-delimited)
+    inner_pdata = bytearray()
+    
+    if energy_backup_en is not None and energy_backup_en == 1:
+        # Enable: include both fields
+        # energy_backup_en = 1 (field 1)
+        inner_pdata.extend(_encode_varint((1 << 3) | 0))  # field 1, wire type 0
+        inner_pdata.extend(_encode_varint(1))
+        # energy_backup_start_soc (field 2)
+        inner_pdata.extend(_encode_varint((2 << 3) | 0))  # field 2, wire type 0
+        inner_pdata.extend(_encode_varint(int(energy_backup_start_soc)))
+        message.data_len = 7
+    else:
+        # Disable: only send energy_backup_start_soc (no enable field means disabled)
+        # energy_backup_start_soc (field 2)
+        inner_pdata.extend(_encode_varint((2 << 3) | 0))  # field 2, wire type 0
+        inner_pdata.extend(_encode_varint(int(energy_backup_start_soc)))
+        message.data_len = 5
+    
+    # Wrap in cfgEnergyBackup (field 43, wire type 2)
+    pdata = bytearray()
+    pdata.extend(_encode_varint((43 << 3) | 2))  # field 43, wire type 2 (length-delimited)
+    pdata.extend(_encode_varint(len(inner_pdata)))  # length prefix
+    pdata.extend(inner_pdata)
+    
+    message.pdata = bytes(pdata)
+    
+    class River3CommandMessage(ProtoMessage):
+        def __init__(self, packet: SendHeaderMsg):
+            super().__init__(command=None, payload=None)
+            self._packet = packet
+        
+        def private_api_to_mqtt_payload(self):
+            return self._packet.SerializeToString()
+    
+    return River3CommandMessage(packet)
+
+
 # Message type mapping for BMS heartbeat related reports
 # These (cmdFunc, cmdId) pairs are known to map to BMSHeartBeatReport
 BMS_HEARTBEAT_COMMANDS: set[tuple[int, int]] = {
@@ -156,7 +329,9 @@ class River3(BaseDevice):
 
     @override
     def numbers(self, client: EcoflowApiClient) -> list[BaseNumberEntity]:
+        device = self
         return [
+            # Max charge SOC - protobuf field cms_max_chg_soc (field 33)
             MaxBatteryLevelEntity(
                 client,
                 self,
@@ -164,12 +339,11 @@ class River3(BaseDevice):
                 const.MAX_CHARGE_LEVEL,
                 50,
                 100,
-                lambda value: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 33, "cmsMaxChgSoc": int(value)},
-                },
+                lambda value: _create_river3_proto_command(
+                    "cms_max_chg_soc", int(value), device.device_data.sn
+                ),
             ),
+            # Min discharge SOC - protobuf field cms_min_dsg_soc (field 34)
             MinBatteryLevelEntity(
                 client,
                 self,
@@ -177,12 +351,11 @@ class River3(BaseDevice):
                 const.MIN_DISCHARGE_LEVEL,
                 0,
                 30,
-                lambda value: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 34, "cmsMinDsgSoc": int(value)},
-                },
+                lambda value: _create_river3_proto_command(
+                    "cms_min_dsg_soc", int(value), device.device_data.sn
+                ),
             ),
+            # AC charging power - protobuf field plug_in_info_ac_in_chg_pow_max (field 54)
             ChargingPowerEntity(
                 client,
                 self,
@@ -190,12 +363,11 @@ class River3(BaseDevice):
                 const.AC_CHARGING_POWER,
                 50,
                 305,
-                lambda value: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 54, "plugInInfoAcInChgPowMax": int(value)},
-                },
+                lambda value: _create_river3_proto_command(
+                    "plug_in_info_ac_in_chg_pow_max", int(value), device.device_data.sn
+                ),
             ),
+            # Battery backup level - uses nested cfgEnergyBackup (field 43)
             BatteryBackupLevel(
                 client,
                 self,
@@ -206,161 +378,141 @@ class River3(BaseDevice):
                 "cms_min_dsg_soc",
                 "cms_max_chg_soc",
                 5,
-                lambda value: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {
-                        "id": 43,
-                        "cfgEnergyBackup": {
-                            "energyBackupEn": 1,
-                            "energyBackupStartSoc": int(value),
-                        },
-                    },
-                },
+                lambda value: _create_river3_energy_backup_command(
+                    1, int(value), device.device_data.sn
+                ),
             ),
         ]
 
     @override
     def switches(self, client: EcoflowApiClient) -> list[BaseSwitchEntity]:
+        device = self
         return [
-            # Beeper control - en_beep field 9 in SetCommand, field 195 in Display
+            # Beeper control - using protobuf field en_beep (field 9)
             BeeperEntity(
                 client,
                 self,
                 "en_beep",
                 const.BEEPER,
-                lambda value: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 9, "enBeep": value},
-                },
+                lambda value: _create_river3_proto_command(
+                    "en_beep", 1 if value else 0, device.device_data.sn, data_len=2
+                ),
             ),
-            # AC Output - cfg_ac_out_open field 76 in SetCommand
+            # AC Output - using protobuf field cfg_ac_out_open (field 76)
             EnabledEntity(
                 client,
                 self,
                 "cfg_ac_out_open",
                 const.AC_ENABLED,
-                lambda value, params=None: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 76, "cfgAcOutOpen": value},
-                },
+                lambda value, params=None: _create_river3_proto_command(
+                    "cfg_ac_out_open", 1 if value else 0, device.device_data.sn
+                ),
             ),
-            # X-Boost - xboost_en field 25 in SetCommand
+            # X-Boost - using protobuf field xboost_en (field 25)
             EnabledEntity(
                 client,
                 self,
                 "xboost_en",
                 const.XBOOST_ENABLED,
-                lambda value, params=None: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 25, "xboostEn": value},
-                },
+                lambda value, params=None: _create_river3_proto_command(
+                    "xboost_en", 1 if value else 0, device.device_data.sn
+                ),
             ),
-            # DC 12V Output - cfg_dc12v_out_open field 18 in SetCommand
+            # DC 12V Output - using protobuf field cfg_dc12v_out_open (field 18)
             EnabledEntity(
                 client,
                 self,
                 "dc_out_open",
                 const.DC_ENABLED,
-                lambda value, params=None: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 18, "cfgDc12vOutOpen": value},
-                },
+                lambda value, params=None: _create_river3_proto_command(
+                    "cfg_dc12v_out_open", 1 if value else 0, device.device_data.sn
+                ),
             ),
-            # AC Always On - output_power_off_memory field 147 in SetCommand
+            # AC Always On - using protobuf field output_power_off_memory (field 147)
             EnabledEntity(
                 client,
                 self,
                 "output_power_off_memory",
                 const.AC_ALWAYS_ENABLED,
-                lambda value, params=None: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 147, "outputPowerOffMemory": value},
-                },
+                lambda value, params=None: _create_river3_proto_command(
+                    "output_power_off_memory", 1 if value else 0, device.device_data.sn
+                ),
             ),
-            # Backup Reserve - cfg_energy_backup field 43 in SetCommand
+            # Backup Reserve - uses nested cfgEnergyBackup (field 43)
+            # When enabling, needs to include energy_backup_start_soc from current state
             EnabledEntity(
                 client,
                 self,
                 "energy_backup_en",
                 const.BP_ENABLED,
-                lambda value, params=None: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 43, "cfgEnergyBackup": {"energyBackupEn": 1 if value else 0}},
-                },
+                lambda value, params=None: _create_river3_energy_backup_command(
+                    1 if value else None,  # None means disable (don't send enable field)
+                    params.get("energy_backup_start_soc", 5) if params else 5,
+                    device.device_data.sn
+                ),
             ),
         ]
 
     @override
     def selects(self, client: EcoflowApiClient) -> list[BaseSelectEntity]:
+        device = self
         dc_charge_current_options = {"4A": 4, "6A": 6, "8A": 8}
 
         return [
+            # DC charge current - protobuf field plug_in_info_pv_dc_amp_max (field 87)
             DictSelectEntity(
                 client,
                 self,
                 "plug_in_info_pv_dc_amp_max",
                 const.DC_CHARGE_CURRENT,
                 dc_charge_current_options,
-                lambda value: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 87, "plugInInfoPvDcAmpMax": value},
-                },
+                lambda value: _create_river3_proto_command(
+                    "plug_in_info_pv_dc_amp_max", int(value), device.device_data.sn
+                ),
             ),
+            # DC charging mode - protobuf field pv_chg_type (field 90)
             DictSelectEntity(
                 client,
                 self,
                 "pv_chg_type",
                 const.DC_MODE,
                 const.DC_MODE_OPTIONS,
-                lambda value: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 90, "pvChgType": value},
-                },
+                lambda value: _create_river3_proto_command(
+                    "pv_chg_type", int(value), device.device_data.sn
+                ),
             ),
+            # Screen timeout - protobuf field screen_off_time (field 12)
             TimeoutDictSelectEntity(
                 client,
                 self,
                 "screen_off_time",
                 const.SCREEN_TIMEOUT,
                 const.SCREEN_TIMEOUT_OPTIONS,
-                lambda value: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 12, "screenOffTime": value},
-                },
+                lambda value: _create_river3_proto_command(
+                    "screen_off_time", int(value), device.device_data.sn
+                ),
             ),
+            # Unit timeout - protobuf field dev_standby_time (field 13)
             TimeoutDictSelectEntity(
                 client,
                 self,
                 "dev_standby_time",
                 const.UNIT_TIMEOUT,
                 const.UNIT_TIMEOUT_OPTIONS,
-                lambda value: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 13, "devStandbyTime": value},
-                },
+                lambda value: _create_river3_proto_command(
+                    "dev_standby_time", int(value), device.device_data.sn
+                ),
             ),
+            # AC timeout - protobuf field ac_standby_time (field 10)
             TimeoutDictSelectEntity(
                 client,
                 self,
                 "ac_standby_time",
                 const.AC_TIMEOUT,
                 const.AC_TIMEOUT_OPTIONS,
-                lambda value: {
-                    "moduleType": 0,
-                    "operateType": "TCP",
-                    "params": {"id": 10, "acStandbyTime": value},
-                },
+                lambda value: _create_river3_proto_command(
+                    "ac_standby_time", int(value), device.device_data.sn
+                ),
             ),
         ]
 
@@ -409,14 +561,9 @@ class River3(BaseDevice):
             flat_dict = self._flatten_dict(decoded_data)
             _LOGGER.debug(f"Flat dict for params (all fields): {flat_dict}")  # noqa: G004
         except Exception as e:
-            _LOGGER.error(f"[River3] Data processing failed: {e}", exc_info=True)
-            _LOGGER.debug("[River3] Attempting JSON fallback after protobuf failure")
-            # Fallback to parent's JSON processing for compatibility
-            try:
-                return super()._prepare_data(raw_data)
-            except Exception as e2:
-                _LOGGER.error(f"[River3] JSON fallback also failed: {e2}")
-                return {}
+            _LOGGER.debug(f"[River3] Data processing failed: {e}")
+            # Fallback to quiet JSON processing
+            return self._quiet_json_parse(raw_data)
 
         # Home Assistant expects a dict with 'params' on success
         _LOGGER.debug(f"[River3] Successfully processed protobuf data, returning {len(flat_dict or {})} fields")
@@ -438,17 +585,15 @@ class River3(BaseDevice):
             except Exception:
                 _LOGGER.debug("Data is not Base64 encoded, using as-is")
 
-            # Try to decode as River3HeaderMessage
+            # Try to decode as HeaderMessage
             try:
                 header_msg = pb2.River3HeaderMessage()
                 header_msg.ParseFromString(raw_data)
             except AttributeError as e:
-                _LOGGER.error(f"River3HeaderMessage class not found in pb2 module: {e}")
-                _LOGGER.debug(f"Available classes in pb2: {[attr for attr in dir(pb2) if not attr.startswith('_')]}")
+                _LOGGER.debug(f"River3HeaderMessage class not found in pb2 module: {e}")
                 return None
             except Exception as e:
-                _LOGGER.error(f"Failed to parse River3HeaderMessage: {e}")
-                _LOGGER.debug(f"Raw data length: {len(raw_data)}, first 20 bytes: {raw_data[:20].hex()}")
+                _LOGGER.debug(f"Failed to parse River3HeaderMessage: {e}")
                 return None
 
             if not header_msg.header:
@@ -535,13 +680,13 @@ class River3(BaseDevice):
             _LOGGER.debug(f"Decoding message: cmdFunc={cmd_func}, cmdId={cmd_id}, size={len(pdata)} bytes")
 
             if cmd_func == 254 and cmd_id == 21:
-                # River3DisplayPropertyUpload - main status and settings
+                # DisplayPropertyUpload - main status and settings
                 msg = pb2.River3DisplayPropertyUpload()
                 msg.ParseFromString(pdata)
                 return self._protobuf_to_dict(msg)
 
             elif cmd_func == 254 and cmd_id == 22:
-                # River3RuntimePropertyUpload - runtime sensor data
+                # RuntimePropertyUpload - runtime sensor data
                 msg = pb2.River3RuntimePropertyUpload()
                 msg.ParseFromString(pdata)
                 return self._protobuf_to_dict(msg)
@@ -553,7 +698,7 @@ class River3(BaseDevice):
                     msg.ParseFromString(pdata)
                     return self._protobuf_to_dict(msg)
                 except Exception as e:
-                    _LOGGER.debug(f"Failed to decode as River3SetCommand: {e}")
+                    _LOGGER.debug(f"Failed to decode as set_dp3: {e}")
                     return {}
 
             elif cmd_func == 254 and cmd_id == 18:
@@ -569,34 +714,34 @@ class River3(BaseDevice):
                         _LOGGER.debug(f"Set reply indicates config not OK: {result}")
                         return {}
                 except Exception as e:
-                    _LOGGER.debug(f"Failed to decode as River3SetReply: {e}")
+                    _LOGGER.debug(f"Failed to decode as setReply_dp3: {e}")
                     return {}
 
             elif cmd_func == 32 and cmd_id == 2:
-                # River3CMSHeartBeatReport (CMS = Combined Management System)
+                # cmdFunc32_cmdId2_Report (CMS = Combined Management System)
                 try:
                     msg = pb2.River3CMSHeartBeatReport()
                     msg.ParseFromString(pdata)
                     return self._protobuf_to_dict(msg)
                 except Exception as e:
-                    _LOGGER.debug(f"Failed to decode as River3CMSHeartBeatReport: {e}")
+                    _LOGGER.debug(f"Failed to decode as cmdFunc32_cmdId2_Report: {e}")
                     return {}
 
             elif self._is_bms_heartbeat(cmd_func, cmd_id):
-                # River3BMSHeartBeatReport - Battery heartbeat with cycles and energy data
+                # BMSHeartBeatReport - Battery heartbeat with cycles and energy data
                 try:
                     msg = pb2.River3BMSHeartBeatReport()
                     msg.ParseFromString(pdata)
-                    _LOGGER.debug(f"Successfully decoded River3BMSHeartBeatReport: cmdFunc={cmd_func}, cmdId={cmd_id}")
+                    _LOGGER.debug(f"Successfully decoded BMSHeartBeatReport: cmdFunc={cmd_func}, cmdId={cmd_id}")
                     return self._protobuf_to_dict(msg)
                 except Exception as e:
-                    _LOGGER.debug(f"Failed to decode as River3BMSHeartBeatReport (cmdFunc={cmd_func}, cmdId={cmd_id}): {e}")
+                    _LOGGER.debug(f"Failed to decode as BMSHeartBeatReport (cmdFunc={cmd_func}, cmdId={cmd_id}): {e}")
                     return {}
 
-            # Unknown message type - try River3BMSHeartBeatReport as fallback
+            # Unknown message type - try BMSHeartBeatReport as fallback
             _LOGGER.debug(f"Unknown message type: cmdFunc={cmd_func}, cmdId={cmd_id}, size={len(pdata)} bytes")
 
-            # Try to decode as River3BMSHeartBeatReport since that's a common case
+            # Try to decode as BMSHeartBeatReport since that's a common case
             try:
                 msg = pb2.River3BMSHeartBeatReport()
                 msg.ParseFromString(pdata)
@@ -604,17 +749,17 @@ class River3(BaseDevice):
                 # Check if we got meaningful data (cycles or energy fields)
                 if "cycles" in result or "accu_chg_energy" in result or "accu_dsg_energy" in result:
                     _LOGGER.info(
-                        f"Found River3BMSHeartBeatReport at unexpected cmdFunc={cmd_func}, cmdId={cmd_id}. "
+                        f"Found BMSHeartBeatReport at unexpected cmdFunc={cmd_func}, cmdId={cmd_id}. "
                         f"Consider updating BMS_HEARTBEAT_COMMANDS mapping."
                     )
                     return result
             except Exception as e:
-                _LOGGER.debug(f"Failed fallback River3BMSHeartBeatReport decode: {e}")
+                _LOGGER.debug(f"Failed fallback BMSHeartBeatReport decode: {e}")
 
             return {}
 
         except Exception as e:
-            _LOGGER.error(f"Message decode error for cmdFunc={cmd_func}, cmdId={cmd_id}: {e}")
+            _LOGGER.debug(f"Message decode error for cmdFunc={cmd_func}, cmdId={cmd_id}: {e}")
             return {}
 
     def _is_bms_heartbeat(self, cmd_func: int, cmd_id: int) -> bool:
@@ -659,26 +804,79 @@ class River3(BaseDevice):
 
     @override
     def update_data(self, raw_data, data_type: str) -> bool:
-        """Decode protobuf for all topics since River 3 uses protobuf throughout."""
+        """Decode protobuf for data_topic; silently handle other topics."""
         if data_type == self.device_info.data_topic:
+            # Device status updates come as protobuf
             raw = self._prepare_data(raw_data)
             self.data.update_data(raw)
         elif data_type == self.device_info.set_topic:
-            # Set commands we send - use protobuf parsing
-            raw = self._prepare_data(raw_data)
-            self.data.add_set_message(raw)
+            # Commands we send - silently ignore echoes
+            pass
         elif data_type == self.device_info.set_reply_topic:
-            # Device replies with protobuf
-            raw = self._prepare_data(raw_data)
+            # Device replies to commands - try protobuf
+            # Also update entity data since AC switch status comes from setReply
+            raw = self._prepare_set_reply_data(raw_data)
+            if raw:
+                self.data.update_data(raw)  # Update entities with reply data
             self.data.add_set_reply_message(raw)
         elif data_type == self.device_info.get_topic:
-            # Get commands we send - use protobuf parsing
-            raw = self._prepare_data(raw_data)
-            self.data.add_get_message(raw)
+            # Get commands we send - silently ignore
+            pass
         elif data_type == self.device_info.get_reply_topic:
-            # Device replies with protobuf
-            raw = self._prepare_data(raw_data)
+            # Get replies - try protobuf, also update entity data
+            raw = self._prepare_set_reply_data(raw_data)
+            if raw:
+                self.data.update_data(raw)  # Update entities with reply data
             self.data.add_get_reply_message(raw)
         else:
             return False
         return True
+
+    def _prepare_set_reply_data(self, raw_data: bytes) -> dict[str, Any]:
+        """Parse set/get reply data - try protobuf, fall back to quiet JSON."""
+        try:
+            # Try to decode as protobuf HeaderMessage first
+            import base64
+            try:
+                decoded_payload = base64.b64decode(raw_data, validate=True)
+                raw_data = decoded_payload
+            except Exception:
+                pass
+
+            header_msg = pb2.River3HeaderMessage()
+            header_msg.ParseFromString(raw_data)
+
+            if header_msg.header:
+                header = header_msg.header[0]
+                pdata = getattr(header, "pdata", b"")
+                if pdata:
+                    # Try to decode as SetReply
+                    try:
+                        enc_type = getattr(header, "enc_type", 0)
+                        src = getattr(header, "src", 0)
+                        seq = getattr(header, "seq", 0)
+                        if enc_type == 1 and src != 32:
+                            pdata = self._xor_decode_pdata(pdata, seq)
+
+                        reply_msg = pb2.River3SetReply()
+                        reply_msg.ParseFromString(pdata)
+                        result = self._protobuf_to_dict(reply_msg)
+                        if result.get("config_ok"):
+                            _LOGGER.debug(f"Set reply successful: {result}")
+                        return {"params": self._flatten_dict(result)}
+                    except Exception as e:
+                        _LOGGER.debug(f"Failed to parse as River3SetReply: {e}")
+        except Exception as e:
+            _LOGGER.debug(f"Protobuf parse failed for set_reply: {e}")
+
+        # Fall back to quiet JSON parsing (no error logs)
+        return self._quiet_json_parse(raw_data)
+
+    def _quiet_json_parse(self, raw_data: bytes) -> dict[str, Any]:
+        """Parse JSON data without logging errors."""
+        import json
+        try:
+            payload = raw_data.decode("utf-8", errors="ignore")
+            return json.loads(payload)
+        except Exception:
+            return {}

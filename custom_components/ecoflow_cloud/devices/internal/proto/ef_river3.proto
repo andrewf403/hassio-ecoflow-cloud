@@ -9,51 +9,56 @@ import "ecopacket.proto";
 // =============================================================================
 // Display Property Upload - cmdFunc=254, cmdId=21
 // Main status and settings message, sent periodically by the device
+// Field numbers from ioBroker/EcoFlow JS implementation
 // =============================================================================
 message River3DisplayPropertyUpload {
     optional uint32 errcode = 1;                          // Error code
     optional float pow_in_sum_w = 3;                      // Total input power (W)
     optional float pow_out_sum_w = 4;                     // Total output power (W)
-    optional uint32 lcd_light = 5;                        // LCD brightness level
-    optional uint32 energy_backup_state = 6;              // Backup reserve state
     optional uint32 energy_backup_en = 7;                 // Backup reserve enabled (bool)
     optional uint32 energy_backup_start_soc = 8;          // Backup reserve SOC threshold (%)
     optional float pow_get_qcusb1 = 9;                    // USB QC1 output power (W)
     optional float pow_get_qcusb2 = 10;                   // USB QC2 output power (W)
-    optional float pow_get_typec1 = 11;                   // Type-C output power (W)
+    optional float pow_get_typec1 = 11;                   // Type-C 1 output power (W)
+    optional float pow_get_typec2 = 12;                   // Type-C 2 output power (W)
     optional uint32 flow_info_qcusb1 = 13;                // USB QC1 flow direction
     optional uint32 flow_info_qcusb2 = 14;                // USB QC2 flow direction
-    optional uint32 flow_info_typec1 = 15;                // Type-C flow direction
+    optional uint32 flow_info_typec1 = 15;                // Type-C 1 flow direction
+    optional uint32 flow_info_typec2 = 16;                // Type-C 2 flow direction
     optional uint32 dev_standby_time = 17;                // Unit timeout (min)
     optional uint32 screen_off_time = 18;                 // Screen timeout (sec)
     optional uint32 ac_standby_time = 19;                 // AC timeout (min)
-    optional uint32 dc_standby_time = 20;                 // DC timeout (min)
+    optional uint32 ac_always_on_flag = 22;               // AC always on flag (bool)
+    optional uint32 ac_always_on_mini_soc = 23;           // AC always on min SOC (%)
     optional uint32 xboost_en = 25;                       // X-Boost enabled (bool)
     optional uint32 pcs_fan_level = 30;                   // PCS fan level
-    optional uint32 flow_info_pv = 31;                    // Solar PV flow direction
     optional uint32 flow_info_12v = 33;                   // 12V DC flow direction
-    optional float pow_get_pv = 35;                       // Solar input power (W)
     optional float pow_get_12v = 37;                      // 12V DC output power (W)
-    optional uint32 plug_in_info_pv_flag = 39;            // Solar PV connected flag
-    optional uint32 plug_in_info_pv_type = 40;            // Solar PV input type
     optional uint32 flow_info_ac2dc = 45;                 // AC to DC flow direction
     optional uint32 flow_info_dc2ac = 46;                 // DC to AC flow direction
     optional uint32 flow_info_ac_in = 47;                 // AC input flow direction
-    optional uint32 flow_info_ac_out = 48;                // AC output flow direction
-    optional float pow_get_llc = 52;                      // LLC converter power (W)
     optional float pow_get_ac = 53;                       // AC output power (W)
     optional float pow_get_ac_in = 54;                    // AC input power (W)
     optional uint32 plug_in_info_ac_in_flag = 61;         // AC input connected flag
     optional uint32 plug_in_info_ac_in_feq = 62;          // AC input frequency (Hz)
     optional uint32 dc_out_open = 74;                     // DC output enabled (bool)
+    // Note: AC output (cfg_ac_out_open) status is primarily reported via set_dp3 (cmdId 17)
+    // but we include it here for consistency in data merging
     optional uint32 cfg_ac_out_open = 76;                 // AC output enabled (bool)
-    optional uint32 plug_in_info_pv_dc_amp_max = 87;      // Max solar charge current (A)
-    optional uint32 pv_chg_type = 90;                     // Solar charging type (0=Auto, 1=Solar, 2=Car)
-    optional int32 utc_timezone = 133;                    // UTC timezone offset
-    optional string utc_timezone_id = 134;                // Timezone ID string
-    optional uint32 utc_set_mode = 135;                   // Timezone set mode (bool)
+    optional float pow_get_dcp2 = 77;                     // DCP2 power (W)
+    optional uint32 flow_info_dcp2_in = 78;               // DCP2 input flow
+    optional uint32 flow_info_dcp2_out = 79;              // DCP2 output flow
+    optional uint32 plug_in_info_dcp2_in_flag = 83;       // DCP2 input flag (bool)
+    optional uint32 plug_in_info_dcp2_dsg_chg_type = 84;  // DCP2 charge/discharge type
+    optional uint32 plug_in_info_dcp2_charger_flag = 85;  // DCP2 charger flag (bool)
+    optional uint32 plug_in_info_dcp2_type = 86;          // DCP2 type
+    optional uint32 plug_in_info_dcp2_detail = 87;        // DCP2 detail
+    optional string plug_in_info_dcp2_sn = 88;            // DCP2 serial number
+    optional uint32 plug_in_info_dcp2_run_state = 89;     // DCP2 run state
+    optional uint32 plug_in_info_dcp2_firm_ver = 90;      // DCP2 firmware version
     optional uint32 bms_err_code = 140;                   // BMS error code
-    optional uint32 output_power_off_memory = 147;        // AC always on / power off memory (bool)
+    optional uint32 output_power_off_memory = 147;        // AC always on / power off memory (bool) - READ field
+    optional uint32 pv_chg_type = 148;                    // Solar charging type (0=Auto, 1=Solar, 2=Car)
     optional uint32 flow_info_bms_dsg = 152;              // BMS discharge flow
     optional uint32 flow_info_bms_chg = 153;              // BMS charge flow
     optional float pow_get_bms = 158;                     // BMS power (W)
@@ -63,8 +68,10 @@ message River3DisplayPropertyUpload {
     optional uint32 ac_out_freq = 211;                    // AC output frequency (Hz)
     optional uint32 dev_sleep_state = 212;                // Device sleep state
     optional uint32 pd_err_code = 213;                    // PD error code
-    optional uint32 llc_err_code = 214;                   // LLC error code
     optional uint32 mppt_err_code = 215;                  // MPPT error code
+    optional uint32 llc_hv_lv_flag = 227;                 // LLC high/low voltage flag
+    optional uint32 llc_inv_err_code = 232;               // LLC inverter error code
+    optional uint32 plug_in_info_ac_out_dsg_pow_max = 238;// AC output max discharge power (W)
     optional float bms_batt_soc = 242;                    // Battery SOC (%)
     optional float bms_batt_soh = 243;                    // Battery SOH (%)
     optional uint32 bms_design_cap = 248;                 // Battery design capacity (mAh)
@@ -83,29 +90,63 @@ message River3DisplayPropertyUpload {
     optional uint32 cms_bms_run_state = 275;              // Combined BMS run state
     optional uint32 bms_chg_dsg_state = 281;              // Charge/discharge state (0=idle, 1=dsg, 2=chg)
     optional uint32 cms_chg_dsg_state = 282;              // Combined charge/discharge state
-    optional uint32 ble_standby_time = 290;               // Bluetooth standby time (min)
+    optional uint32 time_task_conflict_flag = 285;        // Time task conflict flag
+    optional uint32 time_task_change_cnt = 286;           // Time task change count
+    optional uint32 ups_alram = 355;                      // UPS alarm (bool)
+    optional uint32 plug_in_info_pv_dc_amp_max = 356;     // Max solar charge current (A) - READ field
+    optional uint32 led_mode = 357;                       // LED mode
+    optional uint32 low_power_alarm = 358;                // Low power alarm (W)
+    optional uint32 silence_chg_watt = 359;               // Silent charging watt (W)
+    optional uint32 flow_info_pv = 360;                   // Solar PV flow direction
+    optional float pow_get_pv = 361;                      // Solar input power (W)
+    optional uint32 plug_in_info_pv_flag = 362;           // Solar PV connected flag (bool)
+    optional uint32 plug_in_info_pv_type = 363;           // Solar PV input type
+    optional uint32 plug_in_info_pv_charger_flag = 364;   // PV charger flag (bool)
+    optional uint32 plug_in_info_pv_chg_amp_max = 365;    // PV charge amp max (A)
+    optional uint32 plug_in_info_pv_chg_vol_max = 366;    // PV charge vol max (V)
+    optional uint32 flow_info_ac_out = 367;               // AC output flow direction
+    optional float pow_get_ac_out = 368;                  // AC output power (W)
+    optional uint32 flow_info_dcp_in = 423;               // DCP input flow
+    optional uint32 flow_info_dcp_out = 424;              // DCP output flow
+    optional float pow_get_dcp = 425;                     // DCP power (W)
+    optional uint32 plug_in_info_dcp_in_flag = 426;       // DCP input flag (bool)
+    optional uint32 plug_in_info_dcp_type = 427;          // DCP type
+    optional uint32 plug_in_info_dcp_detail = 428;        // DCP detail
+    optional uint32 plug_in_info_dcp_dsg_chg_type = 431;  // DCP charge/discharge type
+    optional string plug_in_info_dcp_sn = 433;            // DCP serial number
+    optional uint32 plug_in_info_dcp_firm_ver = 434;      // DCP firmware version
+    optional uint32 plug_in_info_dcp_charger_flag = 435;  // DCP charger flag (bool)
+    optional uint32 plug_in_info_dcp_run_state = 436;     // DCP run state
+    optional uint32 plug_in_info_dcp_err_code = 438;      // DCP error code
+    optional uint32 plug_in_info_dcp2_err_code = 439;     // DCP2 error code
+    optional uint32 plug_in_info_ac_in_chg_hal_pow_max = 458; // AC input charge max power (W)
 }
 
 // =============================================================================
 // Runtime Property Upload - cmdFunc=254, cmdId=22
 // Runtime sensor data, sent more frequently
+// Field numbers from ioBroker/EcoFlow JS implementation
 // =============================================================================
 message River3RuntimePropertyUpload {
+    optional uint32 ac_phase_type = 21;                   // AC phase type
     optional uint32 pcs_work_mode = 24;                   // PCS work mode
     optional float temp_pcs_dc = 26;                      // PCS DC temperature (°C)
     optional float temp_pcs_ac = 27;                      // PCS AC temperature (°C)
-    optional float temp_pv = 28;                          // Solar PV temperature (°C)
-    optional float plug_in_info_pv_vol = 41;              // Solar input voltage (V)
-    optional float plug_in_info_pv_amp = 44;              // Solar input current (mA)
     optional uint32 plug_in_info_ac_out_type = 59;        // AC output type
     optional uint32 plug_in_info_ac_out_freq = 60;        // AC output frequency (Hz)
+    optional float plug_in_info_ac_out_vol = 67;          // AC output voltage (V)
     optional float plug_in_info_ac_in_vol = 68;           // AC input voltage (V)
-    optional float plug_in_info_ac_out_vol = 69;          // AC output voltage (V)
+    optional float plug_in_info_bms_vol = 169;            // BMS voltage (mV)
+    optional uint32 pd_mppt_comm_err = 172;               // PD MPPT comm error (bool)
+    optional uint32 pd_llc_comm_err = 173;                // PD LLC comm error (bool)
+    optional uint32 pd_bms_comm_err = 174;                // PD BMS comm error (bool)
+    optional uint32 pd_iot_comm_err = 175;                // PD IOT comm error (bool)
     optional uint32 pd_firm_ver = 176;                    // PD firmware version
     optional uint32 iot_firm_ver = 177;                   // IoT firmware version
     optional uint32 mppt_firm_ver = 178;                  // MPPT firmware version
-    optional uint32 llc_firm_ver = 179;                   // LLC firmware version
     optional float plug_in_info_ac_in_amp = 223;          // AC input current (mA)
+    optional float plug_in_info_ac_out_amp = 224;         // AC output current (mA)
+    optional uint32 llc_inv_firm_ver = 231;               // LLC inverter firmware version
     optional uint32 bms_firm_ver = 241;                   // BMS firmware version
     optional float bms_batt_vol = 244;                    // Battery voltage (V)
     optional float bms_batt_amp = 245;                    // Battery current (A)
@@ -122,8 +163,32 @@ message River3RuntimePropertyUpload {
     optional float cms_batt_amp = 265;                    // Combined battery current (A)
     optional float cms_chg_req_vol = 266;                 // Charge request voltage (V)
     optional float cms_chg_req_amp = 267;                 // Charge request current (A)
+    optional uint32 bms_overload_icon = 276;              // BMS overload icon
+    optional uint32 bms_warn_icon = 277;                  // BMS warning icon
+    optional uint32 bms_high_temp_icon = 278;             // BMS high temp icon
+    optional uint32 bms_low_temp_icon = 279;              // BMS low temp icon
+    optional uint32 bms_limit_icon = 280;                 // BMS limit icon
     optional uint32 bms_alm_state_2 = 291;                // BMS alarm state 2
     optional uint32 bms_pro_state_2 = 292;                // BMS protection state 2
+    optional int32 display_property_full_upload_period = 293;     // Display upload period
+    optional int32 display_property_incremental_upload_period = 294; // Display incremental period
+    optional int32 runtime_property_full_upload_period = 295;     // Runtime upload period
+    optional int32 runtime_property_incremental_upload_period = 296; // Runtime incremental period
+    optional float pv_vin_ref = 338;                      // PV voltage reference
+    optional uint32 inv_main_fsmstate = 349;              // Inverter main FSM state
+    optional uint32 l1_main_fsmstate = 350;               // L1 main FSM state
+    optional float dcdc_chg_req_cur = 376;                // DC-DC charge request current
+    optional float llc_recv_cms_chg_req_vol = 377;        // LLC receive CMS charge request voltage
+    optional float temp_pv = 379;                         // Solar PV temperature (°C)
+    optional float plug_in_info_pv_vol = 380;             // Solar input voltage (V)
+    optional float plug_in_info_pv_amp = 381;             // Solar input current (mA)
+    optional float plug_in_info_12v_vol = 382;            // 12V output voltage (V)
+    optional float plug_in_info_12v_amp = 383;            // 12V output current (A)
+    optional float llc_bat_vol = 384;                     // LLC battery voltage (V)
+    optional float llc_bat_cur = 385;                     // LLC battery current (A)
+    optional float llc_bus_vol = 386;                     // LLC bus voltage (V)
+    optional float plug_in_info_dcp_vol = 443;            // DCP voltage (V)
+    optional float plug_in_info_dcp_amp = 448;            // DCP current (A)
 }
 
 // =============================================================================
@@ -150,7 +215,7 @@ message River3SetCommand {
     optional uint32 plug_in_info_pv_dc_amp_max = 87;      // Max solar charge current (A)
     optional uint32 cfg_led_mode = 89;                    // LED mode
     optional uint32 pv_chg_type = 90;                     // PV charge type (0=Auto, 1=Solar, 2=Car)
-    optional int32 output_power_off_memory = 147;         // AC always on enable (0/1)
+    optional int32 output_power_off_memory = 141;         // AC always on enable (0/1)
 }
 
 // =============================================================================
@@ -179,7 +244,7 @@ message River3SetReply {
     optional uint32 plug_in_info_pv_dc_amp_max = 87;      // Max solar charge current
     optional uint32 cfg_led_mode = 89;                    // LED mode
     optional uint32 pv_chg_type = 90;                     // PV charge type
-    optional int32 output_power_off_memory = 147;         // AC always on state
+    optional int32 output_power_off_memory = 141;         // AC always on state
 }
 
 // Energy backup configuration sub-message
