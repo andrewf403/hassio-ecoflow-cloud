@@ -432,11 +432,12 @@ class River3(BaseDevice):
                     "xboost_en", 1 if value else 0, device.device_data.sn
                 ),
             ),
-            # DC 12V Output - using protobuf field cfg_dc12v_out_open (field 18)
+            # DC 12V Output - reads from cfg_dc12v_out_open (set_dp3 field 18)
+            # Note: dc_out_open (field 74) in DisplayPropertyUpload is just a diagnostic string
             EnabledEntity(
                 client,
                 self,
-                "dc_out_open",
+                "cfg_dc12v_out_open",
                 const.DC_ENABLED,
                 lambda value, params=None: _create_river3_proto_command(
                     "cfg_dc12v_out_open", 1 if value else 0, device.device_data.sn
