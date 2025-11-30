@@ -1,3 +1,4 @@
+import logging
 from typing import Any, override
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass  # pyright: ignore[reportMissingImports]
@@ -41,56 +42,21 @@ from custom_components.ecoflow_cloud.switch import BeeperEntity, EnabledEntity
 _LOGGER = logging.getLogger(__name__)
 
 
-def _encode_varint(val: int) -> bytes:
-    """Encode an integer as a protobuf varint."""
-    result = bytearray()
-    if val < 0:
-        val = val & 0xFFFFFFFF
-    while val > 0x7F:
-        result.append((val & 0x7F) | 0x80)
-        val >>= 7
-    result.append(val & 0x7F)
-    return bytes(result)
-
-
 def _create_river3_proto_command(field_name: str, value: int, device_sn: str, data_len: int | None = None):
     """Create a protobuf command for River 3."""
     from .proto.ecopacket_pb2 import SendHeaderMsg
     from .proto.support.message import ProtoMessage
     import time
 
-    field_config = {
-        'en_beep': (9, 2),
-        'ac_standby_time': (10, 3),
-        'dc_standby_time': (11, 3),
-        'screen_off_time': (12, 3),
-        'dev_standby_time': (13, 3),
-        'lcd_light': (14, 2),
-        'cfg_dc12v_out_open': (18, 3),
-        'xboost_en': (25, 3),
-        'cms_max_chg_soc': (33, 3),
-        'cms_min_dsg_soc': (34, 3),
-        'plug_in_info_ac_in_chg_pow_max': (54, 4),
-        'cfg_ac_out_open': (76, 3),
-        'plug_in_info_pv_dc_amp_max': (87, 3),
-        'pv_chg_type': (90, 3),
-        'output_power_off_memory': (141, 3),
-    }
-
-    if field_name not in field_config:
+    # Build the command using the generated protobuf class
+    cmd = pb2.River3SetCommand()
+    try:
+        setattr(cmd, field_name, int(value))
+    except AttributeError:
         _LOGGER.error(f"Unknown River3 set field: {field_name}")
         return None
 
-    field_num, default_data_len = field_config[field_name]
-    val = int(value)
-
-    if data_len is None:
-        if field_name == 'plug_in_info_ac_in_chg_pow_max':
-            data_len = 4 if val > 128 else 3
-        elif field_name in ('ac_standby_time', 'dev_standby_time', 'screen_off_time'):
-            data_len = 3 if val > 128 else 2
-        else:
-            data_len = default_data_len
+    pdata = cmd.SerializeToString()
 
     packet = SendHeaderMsg()
     message = packet.msg.add()
@@ -107,13 +73,8 @@ def _create_river3_proto_command(field_name: str, value: int, device_sn: str, da
     message.version = 19
     message.payload_ver = 1
     message.device_sn = device_sn
-    message.data_len = data_len
-
-    pdata = bytearray()
-    field_key = (field_num << 3) | 0
-    pdata.extend(_encode_varint(field_key))
-    pdata.extend(_encode_varint(val))
-    message.pdata = bytes(pdata)
+    message.data_len = data_len if data_len is not None else len(pdata)
+    message.pdata = pdata
 
     class River3CommandMessage(ProtoMessage):
         def __init__(self, packet: SendHeaderMsg):
@@ -136,6 +97,14 @@ def _create_river3_energy_backup_command(
     from .proto.support.message import ProtoMessage
     import time
 
+    # Build the command using the generated protobuf classes
+    cmd = pb2.River3SetCommand()
+    cmd.cfg_energy_backup.energy_backup_start_soc = int(energy_backup_start_soc)
+    if energy_backup_en is not None and energy_backup_en == 1:
+        cmd.cfg_energy_backup.energy_backup_en = 1
+
+    pdata = cmd.SerializeToString()
+
     packet = SendHeaderMsg()
     message = packet.msg.add()
 
@@ -151,25 +120,8 @@ def _create_river3_energy_backup_command(
     message.version = 19
     message.payload_ver = 1
     message.device_sn = device_sn
-
-    inner_pdata = bytearray()
-
-    if energy_backup_en is not None and energy_backup_en == 1:
-        inner_pdata.extend(_encode_varint((1 << 3) | 0))
-        inner_pdata.extend(_encode_varint(1))
-        inner_pdata.extend(_encode_varint((2 << 3) | 0))
-        inner_pdata.extend(_encode_varint(int(energy_backup_start_soc)))
-        message.data_len = 7
-    else:
-        inner_pdata.extend(_encode_varint((2 << 3) | 0))
-        inner_pdata.extend(_encode_varint(int(energy_backup_start_soc)))
-        message.data_len = 5
-
-    pdata = bytearray()
-    pdata.extend(_encode_varint((43 << 3) | 2))
-    pdata.extend(_encode_varint(len(inner_pdata)))
-    pdata.extend(inner_pdata)
-    message.pdata = bytes(pdata)
+    message.data_len = len(pdata)
+    message.pdata = pdata
 
     class River3CommandMessage(ProtoMessage):
         def __init__(self, packet: SendHeaderMsg):
@@ -370,11 +322,10 @@ class River3(BaseDevice):
             decoded_pdata = self._perform_xor_decode(pdata, header_info)
             decoded_data = self._decode_message_by_type(decoded_pdata, header_info)
             if not decoded_data:
-                _LOGGER.debug(f"No data extracted from message cmdFunc={cmd_func}, cmdId={cmd_id}")
                 return {}
 
             flat_dict = self._flatten_dict(decoded_data)
-        except Exception:
+        except Exception as e:
             _LOGGER.debug(f"[River3] Data processing failed: {e}")
             return self._quiet_json_parse(raw_data)
 
