@@ -327,7 +327,7 @@ class River3(BaseDevice):
             flat_dict = self._flatten_dict(decoded_data)
         except Exception as e:
             _LOGGER.debug(f"[River3] Data processing failed: {e}")
-            return self._quiet_json_parse(raw_data)
+            return super()._prepare_data(raw_data)
 
         return {
             "params": flat_dict or {},
@@ -594,13 +594,4 @@ class River3(BaseDevice):
         except Exception as e:
             _LOGGER.debug(f"Protobuf parse failed for set_reply: {e}")
 
-        return self._quiet_json_parse(raw_data)
-
-    def _quiet_json_parse(self, raw_data: bytes) -> dict[str, Any]:
-        """Parse JSON data without logging errors."""
-        import json
-        try:
-            payload = raw_data.decode("utf-8", errors="ignore")
-            return json.loads(payload)
-        except Exception:
-            return {}
+        return super()._prepare_data(raw_data)
