@@ -22,11 +22,15 @@ from custom_components.ecoflow_cloud.number import (
 from custom_components.ecoflow_cloud.select import DictSelectEntity, TimeoutDictSelectEntity
 from custom_components.ecoflow_cloud.sensor import (
     CapacitySensorEntity,
+    CyclesSensorEntity,
+    InEnergySensorEntity,
+    InEnergySolarSensorEntity,
     InMilliampSensorEntity,
     InVoltSensorEntity,
     InWattsSensorEntity,
     LevelSensorEntity,
     MilliVoltSensorEntity,
+    OutEnergySensorEntity,
     OutWattsSensorEntity,
     QuotaStatusSensorEntity,
     RemainSensorEntity,
@@ -298,7 +302,7 @@ class River3(BaseDevice):
             InMilliampSensorEntity(client, self, "plug_in_info_pv_amp", const.SOLAR_IN_CURRENT),
             # AC Input/Output
             InWattsSensorEntity(client, self, "pow_get_ac_in", const.AC_IN_POWER),
-            OutWattsAbsSensorEntity(client, self, "pow_get_ac", const.AC_OUT_POWER),
+            OutWattsAbsSensorEntity(client, self, "pow_get_ac_out", const.AC_OUT_POWER),
             InVoltSensorEntity(client, self, "plug_in_info_ac_in_vol", const.AC_IN_VOLT),
             # Note: AC output voltage sensor may not be available in proto
             # DC Output
@@ -323,6 +327,16 @@ class River3(BaseDevice):
             .attr("bms_max_cell_vol", const.ATTR_MAX_CELL_VOLT, 0),
             MilliVoltSensorEntity(client, self, "bms_min_cell_vol", const.MIN_CELL_VOLT, False),
             MilliVoltSensorEntity(client, self, "bms_max_cell_vol", const.MAX_CELL_VOLT, False),
+            # Battery Cycles (from BMSHeartBeatReport)
+            CyclesSensorEntity(client, self, "cycles", const.CYCLES),
+            # Statistics Energy (from display_statistics_sum - Wh)
+            # These are cumulative energy counters for specific ports/inputs
+            OutEnergySensorEntity(client, self, "ac_out_energy", "AC Output Energy"),
+            InEnergySensorEntity(client, self, "ac_in_energy", "AC Input Energy"),
+            InEnergySolarSensorEntity(client, self, "pv_in_energy", const.SOLAR_IN_ENERGY),
+            OutEnergySensorEntity(client, self, "dc12v_out_energy", "DC 12V Output Energy", False),
+            OutEnergySensorEntity(client, self, "typec_out_energy", "Type-C Output Energy", False),
+            OutEnergySensorEntity(client, self, "usba_out_energy", "USB-A Output Energy", False),
             # Status
             QuotaStatusSensorEntity(client, self),
         ]
@@ -683,7 +697,10 @@ class River3(BaseDevice):
                 # DisplayPropertyUpload - main status and settings
                 msg = pb2.River3DisplayPropertyUpload()
                 msg.ParseFromString(pdata)
-                return self._protobuf_to_dict(msg)
+                result = self._protobuf_to_dict(msg)
+                # Extract statistics (energy data) from display_statistics_sum
+                result = self._extract_statistics(result)
+                return result
 
             elif cmd_func == 254 and cmd_id == 22:
                 # RuntimePropertyUpload - runtime sensor data
@@ -789,6 +806,44 @@ class River3(BaseDevice):
             result = self._manual_protobuf_to_dict(protobuf_obj)
             _LOGGER.debug(f"Manual conversion result fields: {len(result)}")
             return result
+
+    def _extract_statistics(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Extract statistics from display_statistics_sum into flat fields.
+        
+        The statistics are sent as a list of {statistics_object: enum, statistics_content: value}.
+        Field names are derived directly from the proto enum (e.g., STATISTICS_OBJECT_AC_OUT_ENERGY -> ac_out_energy).
+        
+        Energy values are in Wh.
+        """
+        stats_sum = data.get("display_statistics_sum", {})
+        list_info = stats_sum.get("list_info", [])
+        
+        if not list_info:
+            return data
+        
+        for item in list_info:
+            # Handle both snake_case (from proto) and camelCase (from MessageToDict)
+            stat_obj = item.get("statistics_object") or item.get("statisticsObject")
+            stat_content = item.get("statistics_content") or item.get("statisticsContent")
+            
+            if stat_obj is not None and stat_content is not None:
+                # Derive field name from enum string: STATISTICS_OBJECT_AC_OUT_ENERGY -> ac_out_energy
+                if isinstance(stat_obj, str) and stat_obj.startswith("STATISTICS_OBJECT_"):
+                    field_name = stat_obj.replace("STATISTICS_OBJECT_", "").lower()
+                    data[field_name] = stat_content
+                    _LOGGER.debug(f"Extracted statistic: {field_name} = {stat_content}")
+                elif isinstance(stat_obj, int):
+                    # If it's an integer, we need to look up the enum name from the proto
+                    try:
+                        enum_name = pb2.River3StatisticsObject.Name(stat_obj)
+                        if enum_name.startswith("STATISTICS_OBJECT_"):
+                            field_name = enum_name.replace("STATISTICS_OBJECT_", "").lower()
+                            data[field_name] = stat_content
+                            _LOGGER.debug(f"Extracted statistic: {field_name} = {stat_content}")
+                    except ValueError:
+                        _LOGGER.debug(f"Unknown statistics_object value: {stat_obj}")
+        
+        return data
 
     def _manual_protobuf_to_dict(self, protobuf_obj: Any) -> dict[str, Any]:
         """Convert protobuf object to dict manually (fallback)."""

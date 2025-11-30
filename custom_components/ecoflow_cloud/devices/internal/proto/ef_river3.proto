@@ -120,6 +120,7 @@ message River3DisplayPropertyUpload {
     optional uint32 plug_in_info_dcp_err_code = 438;      // DCP error code
     optional uint32 plug_in_info_dcp2_err_code = 439;     // DCP2 error code
     optional uint32 plug_in_info_ac_in_chg_hal_pow_max = 458; // AC input charge max power (W)
+    optional River3DisplayStatisticsRecordList display_statistics_sum = 463; // Statistics summary
 }
 
 // =============================================================================
@@ -383,6 +384,54 @@ message River3BMSHeartBeatReport {
     optional uint32 accu_dsg_energy = 80;                 // Accumulated discharge energy (Wh)
     optional string pack_sn = 81;                         // Battery pack serial number
     optional uint32 water_in_flag = 82;                   // Water ingress flag
+}
+
+// =============================================================================
+// Statistics - Cumulative energy data
+// Sent in DisplayPropertyUpload.display_statistics_sum (field 463)
+// =============================================================================
+
+// Enum mapping for statistics objects
+// Values correspond to indices in the statistics array
+enum River3StatisticsObject {
+    STATISTICS_OBJECT_START = 0;
+    STATISTICS_OBJECT_DEV_WORK_TIME = 1;
+    STATISTICS_OBJECT_AC_OUT_ENERGY = 2;
+    STATISTICS_OBJECT_DC12V_OUT_ENERGY = 3;
+    STATISTICS_OBJECT_TYPEC_OUT_ENERGY = 4;
+    STATISTICS_OBJECT_USBA_OUT_ENERGY = 5;
+    STATISTICS_OBJECT_AC_IN_ENERGY = 6;
+    STATISTICS_OBJECT_PV_IN_ENERGY = 7;
+    STATISTICS_OBJECT_AC_IN_0W_100W_TIME = 8;
+    STATISTICS_OBJECT_AC_IN_OVER_100W_TIME = 9;
+    STATISTICS_OBJECT_AC_OUT_0W_50W_TIME = 10;
+    STATISTICS_OBJECT_AC_OUT_50W_100W_TIME = 11;
+    STATISTICS_OBJECT_AC_OUT_100W_200W_TIME = 12;
+    STATISTICS_OBJECT_AC_OUT_OVER_200W_TIME = 13;
+    STATISTICS_OBJECT_AC_OUT_200W_300W_TIME = 14;
+    STATISTICS_OBJECT_AC_OUT_300W_400W_TIME = 15;
+    STATISTICS_OBJECT_AC_OUT_400W_500W_TIME = 16;
+    STATISTICS_OBJECT_AC_OUT_OVER_500W_TIME = 17;
+    STATISTICS_OBJECT_PV_IN_TIME = 18;
+    STATISTICS_OBJECT_TYPEC_IN_TIME = 19;
+    STATISTICS_OBJECT_DC_OUT_0W_60W_TIME = 20;
+    STATISTICS_OBJECT_DC_OUT_OVER_60W_TIME = 21;
+    STATISTICS_OBJECT_TYPEC_OUT_0W_30W_TIME = 22;
+    STATISTICS_OBJECT_TYPEC_OUT_30W_60W_TIME = 23;
+    STATISTICS_OBJECT_TYPEC_OUT_OVER_60W_TIME = 24;
+    STATISTICS_OBJECT_USBA_OUT_TIME = 25;
+    STATISTICS_OBJECT_LED_OUT_TIME = 26;
+}
+
+// Individual statistics record item
+message River3StatisticsRecordItem {
+    optional River3StatisticsObject statistics_object = 1;
+    optional uint32 statistics_content = 2;
+}
+
+// List of statistics records (sent in display_statistics_sum)
+message River3DisplayStatisticsRecordList {
+    repeated River3StatisticsRecordItem list_info = 1;
 }
 
 // =============================================================================
