@@ -1,16 +1,10 @@
 syntax = "proto3";
 
 // EcoFlow River 3 Protocol Buffer Definitions
-// River 3 is a portable power station from the same generation as Delta Pro 3,
-// sharing similar protobuf message structures with some device-specific differences.
 
 import "ecopacket.proto";
 
-// =============================================================================
 // Display Property Upload - cmdFunc=254, cmdId=21
-// Main status and settings message, sent periodically by the device
-// Field numbers from ioBroker/EcoFlow JS implementation
-// =============================================================================
 message River3DisplayPropertyUpload {
     optional uint32 errcode = 1;                          // Error code
     optional float pow_in_sum_w = 3;                      // Total input power (W)
@@ -42,9 +36,7 @@ message River3DisplayPropertyUpload {
     optional uint32 plug_in_info_ac_in_flag = 61;         // AC input connected flag
     optional uint32 plug_in_info_ac_in_feq = 62;          // AC input frequency (Hz)
     optional uint32 dc_out_open = 74;                     // DC output enabled (bool)
-    // Note: AC output (cfg_ac_out_open) status is primarily reported via set_dp3 (cmdId 17)
-    // but we include it here for consistency in data merging
-    optional uint32 cfg_ac_out_open = 76;                 // AC output enabled (bool)
+    optional uint32 cfg_ac_out_open = 76;                 // AC output enabled
     optional float pow_get_dcp2 = 77;                     // DCP2 power (W)
     optional uint32 flow_info_dcp2_in = 78;               // DCP2 input flow
     optional uint32 flow_info_dcp2_out = 79;              // DCP2 output flow
@@ -93,7 +85,7 @@ message River3DisplayPropertyUpload {
     optional uint32 time_task_conflict_flag = 285;        // Time task conflict flag
     optional uint32 time_task_change_cnt = 286;           // Time task change count
     optional uint32 ups_alram = 355;                      // UPS alarm (bool)
-    optional uint32 plug_in_info_pv_dc_amp_max = 356;     // Max solar charge current (A) - READ field
+    optional uint32 plug_in_info_pv_dc_amp_max = 356;     // Max solar charge current (A)
     optional uint32 led_mode = 357;                       // LED mode
     optional uint32 low_power_alarm = 358;                // Low power alarm (W)
     optional uint32 silence_chg_watt = 359;               // Silent charging watt (W)
@@ -123,11 +115,7 @@ message River3DisplayPropertyUpload {
     optional River3DisplayStatisticsRecordList display_statistics_sum = 463; // Statistics summary
 }
 
-// =============================================================================
 // Runtime Property Upload - cmdFunc=254, cmdId=22
-// Runtime sensor data, sent more frequently
-// Field numbers from ioBroker/EcoFlow JS implementation
-// =============================================================================
 message River3RuntimePropertyUpload {
     optional uint32 ac_phase_type = 21;                   // AC phase type
     optional uint32 pcs_work_mode = 24;                   // PCS work mode
@@ -171,10 +159,10 @@ message River3RuntimePropertyUpload {
     optional uint32 bms_limit_icon = 280;                 // BMS limit icon
     optional uint32 bms_alm_state_2 = 291;                // BMS alarm state 2
     optional uint32 bms_pro_state_2 = 292;                // BMS protection state 2
-    optional int32 display_property_full_upload_period = 293;     // Display upload period
-    optional int32 display_property_incremental_upload_period = 294; // Display incremental period
-    optional int32 runtime_property_full_upload_period = 295;     // Runtime upload period
-    optional int32 runtime_property_incremental_upload_period = 296; // Runtime incremental period
+    optional int32 display_property_full_upload_period = 293;
+    optional int32 display_property_incremental_upload_period = 294;
+    optional int32 runtime_property_full_upload_period = 295;
+    optional int32 runtime_property_incremental_upload_period = 296;
     optional float pv_vin_ref = 338;                      // PV voltage reference
     optional uint32 inv_main_fsmstate = 349;              // Inverter main FSM state
     optional uint32 l1_main_fsmstate = 350;               // L1 main FSM state
@@ -192,10 +180,7 @@ message River3RuntimePropertyUpload {
     optional float plug_in_info_dcp_amp = 448;            // DCP current (A)
 }
 
-// =============================================================================
 // Set Command - cmdFunc=254, cmdId=17
-// Command sent from app/HA to device to change settings
-// =============================================================================
 message River3SetCommand {
     optional int32 cfg_power_off = 3;                     // Power off command
     optional uint32 cfg_utc_time = 6;                     // UTC time setting
@@ -210,7 +195,7 @@ message River3SetCommand {
     optional int32 xboost_en = 25;                        // X-Boost enable (0/1)
     optional int32 cms_max_chg_soc = 33;                  // Max charge SOC (%)
     optional int32 cms_min_dsg_soc = 34;                  // Min discharge SOC (%)
-    optional River3CfgEnergyBackup cfg_energy_backup = 43; // Energy backup config
+    optional River3CfgEnergyBackup cfg_energy_backup = 43;// Energy backup config
     optional int32 plug_in_info_ac_in_chg_pow_max = 54;   // AC charging power max (W)
     optional uint32 cfg_ac_out_open = 76;                 // AC output enable (0/1)
     optional uint32 plug_in_info_pv_dc_amp_max = 87;      // Max solar charge current (A)
@@ -219,10 +204,7 @@ message River3SetCommand {
     optional int32 output_power_off_memory = 141;         // AC always on enable (0/1)
 }
 
-// =============================================================================
 // Set Reply - cmdFunc=254, cmdId=18
-// Confirmation from device after set command
-// =============================================================================
 message River3SetReply {
     optional int32 action_id = 1;                         // Action ID
     optional bool config_ok = 2;                          // Configuration success flag
@@ -238,7 +220,7 @@ message River3SetReply {
     optional int32 xboost_en = 25;                        // X-Boost state
     optional int32 cms_max_chg_soc = 33;                  // Max charge SOC
     optional int32 cms_min_dsg_soc = 34;                  // Min discharge SOC
-    optional River3CfgEnergyBackup cfg_energy_backup = 43; // Energy backup config
+    optional River3CfgEnergyBackup cfg_energy_backup = 43;// Energy backup config
     optional int32 plug_in_info_ac_in_chg_pow_max = 54;   // AC charging power max
     optional uint32 dc_out_open = 74;                     // DC output state
     optional uint32 cfg_ac_out_open = 76;                 // AC output state
@@ -248,16 +230,13 @@ message River3SetReply {
     optional int32 output_power_off_memory = 141;         // AC always on state
 }
 
-// Energy backup configuration sub-message
+// Energy backup configuration
 message River3CfgEnergyBackup {
     optional uint32 energy_backup_en = 1;                 // Backup reserve enabled
     optional uint32 energy_backup_start_soc = 2;          // Backup reserve SOC threshold
 }
 
-// =============================================================================
 // CMS Heartbeat Report - cmdFunc=32, cmdId=2
-// Combined Management System heartbeat with overall system status
-// =============================================================================
 message River3CMSHeartBeatReport {
     optional River3CMSStatus1 msg32_2_1 = 1;
     optional River3CMSStatus2 msg32_2_2 = 2;
@@ -297,10 +276,7 @@ message River3CMSStatus2 {
     optional sint32 cms_status_misc17 = 5;
 }
 
-// =============================================================================
-// BMS Heartbeat Report - cmdFunc=32, cmdId=50 (and other BMS command pairs)
-// Battery Management System detailed status with cycles and energy data
-// =============================================================================
+// BMS Heartbeat Report
 message River3BMSHeartBeatReport {
     optional uint32 num = 1;                              // Battery pack number
     optional uint32 type = 2;                             // Battery type
@@ -386,13 +362,7 @@ message River3BMSHeartBeatReport {
     optional uint32 water_in_flag = 82;                   // Water ingress flag
 }
 
-// =============================================================================
-// Statistics - Cumulative energy data
-// Sent in DisplayPropertyUpload.display_statistics_sum (field 463)
-// =============================================================================
-
-// Enum mapping for statistics objects
-// Values correspond to indices in the statistics array
+// Statistics enum
 enum River3StatisticsObject {
     STATISTICS_OBJECT_START = 0;
     STATISTICS_OBJECT_DEV_WORK_TIME = 1;
@@ -423,22 +393,16 @@ enum River3StatisticsObject {
     STATISTICS_OBJECT_LED_OUT_TIME = 26;
 }
 
-// Individual statistics record item
 message River3StatisticsRecordItem {
     optional River3StatisticsObject statistics_object = 1;
     optional uint32 statistics_content = 2;
 }
 
-// List of statistics records (sent in display_statistics_sum)
 message River3DisplayStatisticsRecordList {
     repeated River3StatisticsRecordItem list_info = 1;
 }
 
-// =============================================================================
 // Header Message Wrapper
-// All messages from device are wrapped in this
-// =============================================================================
 message River3HeaderMessage {
     repeated Header header = 1;
 }
-
