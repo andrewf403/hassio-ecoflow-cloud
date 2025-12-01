@@ -368,9 +368,9 @@ Once installed, use Add Integration -> Ecoflow Cloud.
 
 *Switches*
 - Beeper 
-- AC Enabled 
+- AC Enabled _(only switch, no status)_
 - X-Boost Enabled 
-- DC (12V) Enabled 
+- DC (12V) Enabled _(only switch, no status)_
 - AC Always On 
 - Backup Reserve Enabled 
 
